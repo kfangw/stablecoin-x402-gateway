@@ -28,7 +28,16 @@ type Agent struct {
 	// read from the contract.
 	DomainSeparator [32]byte
 
+	// MaxAmount is the spending limit delegated to the agent.
+	// The agent refuses payment terms that exceed it.
+	MaxAmount *big.Int
+
+	lastPaymentHeader string
 }
+
+// LastPaymentHeader returns the X-PAYMENT header value of the most recent
+// payment. Tests and the demo use it to verify replay rejection.
+func (a *Agent) LastPaymentHeader() string { return a.lastPaymentHeader }
 
 // Result is the outcome of a request that may have involved a payment.
 type Result struct {
@@ -78,10 +87,17 @@ func (a *Agent) Get(url string) (*Result, error) {
 	if !ok {
 		return nil, fmt.Errorf("x402 agent: invalid amount %q", req.MaxAmountRequired)
 	}
+	// Delegation limit: the minimal guard that keeps the agent from paying
+	// beyond its mandate.
+	if a.MaxAmount != nil && amount.Cmp(a.MaxAmount) > 0 {
+		return nil, fmt.Errorf("x402 agent: amount %s exceeds delegated limit %s", amount, a.MaxAmount)
+	}
+
 	header, err := a.buildPayment(req, amount)
 	if err != nil {
 		return nil, err
 	}
+	a.lastPaymentHeader = header
 
 	// Retry with the payment attached.
 	retry, err := http.NewRequest(http.MethodGet, url, nil)
