@@ -105,3 +105,36 @@ func (w *Wallet) SignAuthorization(domainSeparator [32]byte, a Authorization) ([
 	sig[64] += 27
 	return sig, nil
 }
+
+// RecoverSigner recovers the signer address from a signature. The gateway uses
+// it to reject bad payments before submitting anything on-chain.
+func RecoverSigner(domainSeparator [32]byte, a Authorization, sig []byte) (common.Address, error) {
+	if len(sig) != 65 {
+		return common.Address{}, fmt.Errorf("wallet: signature must be 65 bytes, got %d", len(sig))
+	}
+	digest := Digest(domainSeparator, a.StructHash())
+	cp := make([]byte, 65)
+	copy(cp, sig)
+	if cp[64] >= 27 {
+		cp[64] -= 27
+	}
+	pub, err := crypto.SigToPub(digest[:], cp)
+	if err != nil {
+		return common.Address{}, fmt.Errorf("wallet: recover: %w", err)
+	}
+	return crypto.PubkeyToAddress(*pub), nil
+}
+
+// SplitSignature splits a 65-byte signature into the contract arguments (v, r, s).
+func SplitSignature(sig []byte) (v uint8, r, s [32]byte, err error) {
+	if len(sig) != 65 {
+		return 0, r, s, fmt.Errorf("wallet: signature must be 65 bytes, got %d", len(sig))
+	}
+	copy(r[:], sig[0:32])
+	copy(s[:], sig[32:64])
+	v = sig[64]
+	if v < 27 {
+		v += 27
+	}
+	return v, r, s, nil
+}
