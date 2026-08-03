@@ -3,6 +3,7 @@ package token_test
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,71 @@ func TestTransferWithAuthorization(t *testing.T) {
 	used, _ := e.tok.AuthorizationState(payer.Address, nonce)
 	if !used {
 		t.Error("authorization nonce must be marked used")
+	}
+}
+
+// Resubmitting the same authorization must be rejected by the contract
+// (replay protection).
+func TestReplayRejected(t *testing.T) {
+	e := newEnv(t)
+	payer, _ := wallet.New()
+	payee, _ := wallet.New()
+	e.mint(t, payer, 10_000)
+
+	auth, _, _ := makeAuth(t, payer, payee, 500)
+	sig, _ := payer.SignAuthorization(e.domain, auth)
+	if err := submitAuth(e, auth, sig); err != nil {
+		t.Fatal(err)
+	}
+	err := submitAuth(e, auth, sig)
+	if err == nil {
+		t.Fatal("replayed authorization must be rejected")
+	}
+	if !strings.Contains(err.Error(), "authorization used") {
+		t.Logf("revert reason: %v", err)
+	}
+}
+
+// A signature produced by a different key must be rejected.
+func TestWrongSignerRejected(t *testing.T) {
+	e := newEnv(t)
+	payer, _ := wallet.New()
+	attacker, _ := wallet.New()
+	payee, _ := wallet.New()
+	e.mint(t, payer, 10_000)
+
+	// The attacker forges a signature over an authorization in the payer's name.
+	auth, _, _ := makeAuth(t, payer, payee, 500)
+	digest := wallet.Digest(e.domain, auth.StructHash())
+	sig, err := crypto.Sign(digest[:], attacker.Key())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig[64] += 27
+	if err := submitAuth(e, auth, sig); err == nil {
+		t.Fatal("signature by wrong key must be rejected")
+	}
+}
+
+// An expired authorization must be rejected.
+func TestExpiredRejected(t *testing.T) {
+	e := newEnv(t)
+	payer, _ := wallet.New()
+	payee, _ := wallet.New()
+	e.mint(t, payer, 10_000)
+
+	nonce, _ := wallet.NewNonce()
+	auth := wallet.Authorization{
+		From:        payer.Address,
+		To:          payee.Address,
+		Value:       big.NewInt(500),
+		ValidAfter:  big.NewInt(0),
+		ValidBefore: big.NewInt(time.Now().Unix() - 10), // already expired
+		Nonce:       nonce,
+	}
+	sig, _ := payer.SignAuthorization(e.domain, auth)
+	if err := submitAuth(e, auth, sig); err == nil {
+		t.Fatal("expired authorization must be rejected")
 	}
 }
 
