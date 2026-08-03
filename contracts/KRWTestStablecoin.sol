@@ -22,6 +22,10 @@ contract KRWTestStablecoin {
     event Mint(address indexed to, uint256 value);
     event Burn(address indexed from, uint256 value);
     event PauseSet(bool paused);
+    event IssuerTransferStarted(address indexed current, address indexed pending);
+    event IssuerTransferred(address indexed previous, address indexed current);
+
+    address public pendingIssuer; // two-step issuer handover
 
     modifier onlyIssuer() {
         require(msg.sender == issuer, "tKRW: not issuer");
@@ -58,6 +62,18 @@ contract KRWTestStablecoin {
     function setPaused(bool p) external onlyIssuer {
         paused = p;
         emit PauseSet(p);
+    }
+
+    function transferIssuer(address newIssuer) external onlyIssuer {
+        pendingIssuer = newIssuer;
+        emit IssuerTransferStarted(issuer, newIssuer);
+    }
+
+    function acceptIssuer() external {
+        require(msg.sender == pendingIssuer, "tKRW: not pending issuer");
+        emit IssuerTransferred(issuer, pendingIssuer);
+        issuer = pendingIssuer;
+        pendingIssuer = address(0);
     }
 
     // ---- ERC-20 ----
