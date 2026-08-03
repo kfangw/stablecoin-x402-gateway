@@ -6,6 +6,7 @@ package token
 import (
 	_ "embed"
 	"fmt"
+	"math/big"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -58,4 +59,50 @@ func (t *Token) call(opts *bind.CallOpts, method string, args ...interface{}) ([
 	var out []interface{}
 	err := t.bound.Call(opts, &out, method, args...)
 	return out, err
+}
+
+// ---- Read methods ----
+
+func (t *Token) BalanceOf(addr common.Address) (*big.Int, error) {
+	out, err := t.call(nil, "balanceOf", addr)
+	if err != nil {
+		return nil, err
+	}
+	return abi.ConvertType(out[0], new(big.Int)).(*big.Int), nil
+}
+
+func (t *Token) TotalSupply() (*big.Int, error) {
+	out, err := t.call(nil, "totalSupply")
+	if err != nil {
+		return nil, err
+	}
+	return abi.ConvertType(out[0], new(big.Int)).(*big.Int), nil
+}
+
+// DomainSeparator reads the EIP-712 domain separator computed by the contract.
+// Off-chain signing always uses this value so that it can never diverge from
+// what on-chain verification expects.
+func (t *Token) DomainSeparator() ([32]byte, error) {
+	out, err := t.call(nil, "DOMAIN_SEPARATOR")
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return *abi.ConvertType(out[0], new([32]byte)).(*[32]byte), nil
+}
+
+// AuthorizationState reports whether the (authorizer, nonce) pair has been used.
+func (t *Token) AuthorizationState(authorizer common.Address, nonce [32]byte) (bool, error) {
+	out, err := t.call(nil, "authorizationState", authorizer, nonce)
+	if err != nil {
+		return false, err
+	}
+	return out[0].(bool), nil
+}
+
+func (t *Token) Issuer() (common.Address, error) {
+	out, err := t.call(nil, "issuer")
+	if err != nil {
+		return common.Address{}, err
+	}
+	return out[0].(common.Address), nil
 }
