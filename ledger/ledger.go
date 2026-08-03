@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"sort"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
@@ -105,4 +106,74 @@ func (l *Ledger) sub(a common.Address, v *big.Int) {
 		l.Balances[a] = new(big.Int)
 	}
 	l.Balances[a].Sub(l.Balances[a], v)
+}
+
+// Report is the result of a reconciliation run.
+type Report struct {
+	OnChainSupply *big.Int
+	LedgerSupply  *big.Int // Minted - Burned
+	SumBalances   *big.Int
+	Minted        *big.Int
+	Burned        *big.Int
+	Accounts      int
+	Events        int
+	Mismatches    []string
+}
+
+// OK reports whether no mismatch was found.
+func (r Report) OK() bool { return len(r.Mismatches) == 0 }
+
+// Reconcile performs a three-way consistency check:
+//  1. ledger supply (minted minus burned) equals on-chain totalSupply
+//  2. the sum of ledger balances equals on-chain totalSupply
+//  3. each account's ledger balance equals on-chain balanceOf
+func (l *Ledger) Reconcile(ctx context.Context) (Report, error) {
+	if err := l.Sync(ctx); err != nil {
+		return Report{}, err
+	}
+
+	onchain, err := l.tok.TotalSupply()
+	if err != nil {
+		return Report{}, fmt.Errorf("ledger: totalSupply: %w", err)
+	}
+
+	r := Report{
+		OnChainSupply: onchain,
+		LedgerSupply:  new(big.Int).Sub(l.Minted, l.Burned),
+		SumBalances:   new(big.Int),
+		Minted:        new(big.Int).Set(l.Minted),
+		Burned:        new(big.Int).Set(l.Burned),
+		Accounts:      len(l.Balances),
+		Events:        l.Events,
+	}
+	for _, b := range l.Balances {
+		r.SumBalances.Add(r.SumBalances, b)
+	}
+
+	if r.LedgerSupply.Cmp(onchain) != 0 {
+		r.Mismatches = append(r.Mismatches,
+			fmt.Sprintf("ledger supply (minted-burned) %s != on-chain totalSupply %s", r.LedgerSupply, onchain))
+	}
+	if r.SumBalances.Cmp(onchain) != 0 {
+		r.Mismatches = append(r.Mismatches,
+			fmt.Sprintf("sum of account balances %s != on-chain totalSupply %s", r.SumBalances, onchain))
+	}
+
+	// Per-account check; sort addresses for a deterministic order.
+	addrs := make([]common.Address, 0, len(l.Balances))
+	for a := range l.Balances {
+		addrs = append(addrs, a)
+	}
+	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Cmp(addrs[j]) < 0 })
+	for _, a := range addrs {
+		onchainBal, err := l.tok.BalanceOf(a)
+		if err != nil {
+			return Report{}, fmt.Errorf("ledger: balanceOf(%s): %w", a, err)
+		}
+		if onchainBal.Cmp(l.Balances[a]) != 0 {
+			r.Mismatches = append(r.Mismatches,
+				fmt.Sprintf("account %s ledger balance %s != on-chain %s", a, l.Balances[a], onchainBal))
+		}
+	}
+	return r, nil
 }
