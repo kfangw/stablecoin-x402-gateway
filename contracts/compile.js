@@ -11,6 +11,7 @@ const input = {
   sources: { 'KRWTestStablecoin.sol': { content: src } },
   settings: {
     optimizer: { enabled: true, runs: 200 },
+    evmVersion: 'paris',
     outputSelection: { '*': { '*': ['abi', 'evm.bytecode.object'] } },
   },
 };
