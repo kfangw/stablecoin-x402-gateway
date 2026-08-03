@@ -106,3 +106,30 @@ func (t *Token) Issuer() (common.Address, error) {
 	}
 	return out[0].(common.Address), nil
 }
+
+// ---- State-changing methods ----
+
+func (t *Token) Mint(opts *bind.TransactOpts, to common.Address, value *big.Int) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "mint", to, value)
+}
+
+func (t *Token) Burn(opts *bind.TransactOpts, from common.Address, value *big.Int) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "burn", from, value)
+}
+
+func (t *Token) Transfer(opts *bind.TransactOpts, to common.Address, value *big.Int) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "transfer", to, value)
+}
+
+// TransferWithAuthorization submits an EIP-3009 settlement transaction.
+// The authorization is signed by from; gas is paid by the account in opts,
+// which is the settlement executor.
+func (t *Token) TransferWithAuthorization(
+	opts *bind.TransactOpts,
+	from, to common.Address,
+	value, validAfter, validBefore *big.Int,
+	nonce [32]byte,
+	v uint8, r, s [32]byte,
+) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "transferWithAuthorization", from, to, value, validAfter, validBefore, nonce, v, r, s)
+}
