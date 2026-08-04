@@ -1,7 +1,12 @@
 # Docker Compose stack that reproduces the real-node scenario end to end:
-# an anvil node, a one-shot token deployment and mint, and the x402 gateway.
-# `docker compose up` brings up anvil + init + gateway; `docker compose run --rm
-# agent` performs a payment.
+# an anvil node, a one-shot token deployment and mint, a facilitator, and the
+# x402 gateway. `docker compose up` brings up anvil + init + facilitator +
+# gateway; `docker compose run --rm agent` performs a payment.
+#
+# The gateway runs in remote mode: it delegates verification and settlement to
+# the facilitator and holds neither an RPC connection nor a key. The settlement
+# key lives on the facilitator. This is the "resource server does not touch the
+# chain" split from the x402 spec, made concrete in the stack topology.
 #
 # The keys below are the publicly known anvil development accounts (#0, #1, #2).
 # They are shipped for local testing only and never hold real funds.
@@ -35,14 +40,31 @@ services:
       - shared:/shared
     restart: "no"
 
-  gateway:
+  # Verifies and settles payments on-chain; holds the settlement key and pays gas.
+  facilitator:
     image: stablecoin-x402-gateway:local
     depends_on:
       init:
         condition: service_completed_successfully
     environment:
       RPC_URL: http://anvil:8545
-      GATEWAY_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" # anvil key #1
+      FACILITATOR_KEY: "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d" # anvil key #1
+    entrypoint: ["entrypoint-facilitator.sh"]
+    volumes:
+      - shared:/shared
+
+  # Remote mode: no RPC, no key. Delegates verify/settle to the facilitator.
+  gateway:
+    image: stablecoin-x402-gateway:local
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      facilitator:
+        condition: service_started
+    environment:
+      FACILITATOR_URL: http://facilitator:8403
+      NETWORK: eip155:31337 # anvil default chain id
+      PAYTO: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" # anvil account #3 (payment recipient)
     entrypoint: ["entrypoint-gateway.sh"]
     ports:
       - "8402:8402"

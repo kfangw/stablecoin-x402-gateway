@@ -1,9 +1,13 @@
 #!/bin/sh
-# Wait for the init service to publish the token address, then start the gateway.
+# Wait for the init service to publish the token address, then start the gateway
+# in remote mode: it delegates verification and settlement to the facilitator
+# and holds neither an RPC connection nor a key.
 set -eu
 
-RPC="${RPC_URL:-http://anvil:8545}"
 ADDR_FILE="${TOKEN_ADDR_FILE:-/shared/token.addr}"
+FACILITATOR_URL="${FACILITATOR_URL:-http://facilitator:8403}"
+NETWORK="${NETWORK:-eip155:31337}"
+PAYTO="${PAYTO:?PAYTO (payee address) is required}"
 
 i=0
 while [ ! -s "${ADDR_FILE}" ]; do
@@ -16,5 +20,6 @@ while [ ! -s "${ADDR_FILE}" ]; do
 done
 
 TOKEN="$(cat "${ADDR_FILE}")"
-echo "gateway: starting against token ${TOKEN}"
-exec gateway --rpc "${RPC}" --token "${TOKEN}" --listen :8402 --price 500
+echo "gateway: starting against token ${TOKEN}, facilitator ${FACILITATOR_URL}"
+exec gateway --token "${TOKEN}" --listen :8402 --price 500 \
+	--facilitator-url "${FACILITATOR_URL}" --network "${NETWORK}" --pay-to "${PAYTO}"
