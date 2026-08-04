@@ -55,6 +55,14 @@ func Bind(addr common.Address, backend bind.ContractBackend) *Token {
 	}
 }
 
+// At returns a handle carrying only the contract address, with no backend.
+// It is for callers that need the address but never make on-chain calls, such
+// as a gateway that delegates verification and settlement to a remote
+// facilitator. Calling read or write methods on such a handle will panic.
+func At(addr common.Address) *Token {
+	return &Token{Address: addr}
+}
+
 func (t *Token) call(opts *bind.CallOpts, method string, args ...interface{}) ([]interface{}, error) {
 	var out []interface{}
 	err := t.bound.Call(opts, &out, method, args...)

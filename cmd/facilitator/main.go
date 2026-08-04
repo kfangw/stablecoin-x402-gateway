@@ -29,13 +29,6 @@ import (
 
 const facilitatorKeyEnv = "FACILITATOR_KEY"
 
-// facilitatorRequest is the shared body of /verify and /settle.
-type facilitatorRequest struct {
-	X402Version         int                      `json:"x402Version"`
-	PaymentPayload      x402.PaymentPayload      `json:"paymentPayload"`
-	PaymentRequirements x402.PaymentRequirements `json:"paymentRequirements"`
-}
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "facilitator:", err)
@@ -164,8 +157,8 @@ func supportedHandler(network string) http.HandlerFunc {
 	}
 }
 
-func decodeRequest(r *http.Request) (*facilitatorRequest, error) {
-	var req facilitatorRequest
+func decodeRequest(r *http.Request) (*x402.FacilitatorRequest, error) {
+	var req x402.FacilitatorRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		return nil, fmt.Errorf("invalid request body: %w", err)
 	}

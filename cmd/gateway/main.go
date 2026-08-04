@@ -1,8 +1,12 @@
-// Command gateway runs the x402 payment gateway as a standalone HTTP server
-// against a real RPC node. It protects one JSON resource (/premium/report) and
-// settles payments on-chain, paying gas from the GATEWAY_KEY account. The same
-// x402.Gateway backs the simulated demo in cmd/demo; here Commit is nil, so
-// bind.WaitMined polls the node for the settlement receipt.
+// Command gateway runs the x402 payment gateway as a standalone HTTP server.
+// It protects one JSON resource (/premium/report) and delegates verification
+// and settlement to a facilitator.
+//
+// In the default (local) mode it dials an RPC node and settles on-chain itself,
+// paying gas from the GATEWAY_KEY account. With --facilitator-url it delegates
+// to a remote facilitator and needs neither an RPC connection nor a key; it
+// still builds the 402 payment terms, so --token, --network and --pay-to are
+// required in that mode.
 package main
 
 import (
@@ -35,11 +39,13 @@ func main() {
 
 func run() error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
-	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint (local mode)")
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
-	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address)")
+	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
+	facilitatorURL := fs.String("facilitator-url", "", "delegate verify/settle to this facilitator (no RPC or key needed)")
+	network := fs.String("network", "", "x402 network string, e.g. eip155:31337 (required with --facilitator-url)")
 	fs.Parse(os.Args[1:])
 
 	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
@@ -49,35 +55,21 @@ func run() error {
 		return fmt.Errorf("--price must be positive")
 	}
 
-	ctx := context.Background()
-	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	var (
+		gw      *x402.Gateway
+		cleanup func()
+		err     error
+	)
+	if *facilitatorURL != "" {
+		gw, err = remoteGateway(*facilitatorURL, *tokenAddr, *network, *payToFlag, *price)
+	} else {
+		gw, cleanup, err = localGateway(*rpc, *tokenAddr, *payToFlag, *price)
+	}
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-
-	transactor, gatewayAddr, err := nodeutil.TransactorFromEnv(gatewayKeyEnv, chainID)
-	if err != nil {
-		return err
-	}
-
-	payTo := gatewayAddr
-	if *payToFlag != "" {
-		if !common.IsHexAddress(*payToFlag) {
-			return fmt.Errorf("--pay-to %q is not a valid address", *payToFlag)
-		}
-		payTo = common.HexToAddress(*payToFlag)
-	}
-
-	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
-	gw := &x402.Gateway{
-		Token:      tok,
-		Backend:    client,
-		Transactor: transactor,
-		PayTo:      payTo,
-		Price:      big.NewInt(*price),
-		Network:    fmt.Sprintf("eip155:%s", chainID),
-		Commit:     nil, // real node: WaitMined polls for the receipt
+	if cleanup != nil {
+		defer cleanup()
 	}
 
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -88,10 +80,71 @@ func run() error {
 	mux.Handle("/premium/report", gw.Middleware(resource))
 
 	server := &http.Server{Addr: *listen, Handler: mux}
+	mode := "local"
+	if *facilitatorURL != "" {
+		mode = "remote facilitator " + *facilitatorURL
+	}
+	log.Printf("x402 gateway on %s (%s): token %s, price %s tKRW, payTo %s, network %s",
+		*listen, mode, gw.Token.Address.Hex(), gw.Price, gw.PayTo.Hex(), gw.Network)
 
-	log.Printf("x402 gateway on %s: token %s, price %s tKRW, payTo %s, network %s",
-		*listen, tok.Address.Hex(), gw.Price, payTo.Hex(), gw.Network)
+	return serve(server)
+}
 
+// localGateway dials the node, reads the chain ID, and settles on-chain itself.
+func localGateway(rpc, tokenAddr, payToFlag string, price int64) (*x402.Gateway, func(), error) {
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, rpc)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	transactor, gatewayAddr, err := nodeutil.TransactorFromEnv(gatewayKeyEnv, chainID)
+	if err != nil {
+		client.Close()
+		return nil, nil, err
+	}
+
+	payTo := gatewayAddr
+	if payToFlag != "" {
+		if !common.IsHexAddress(payToFlag) {
+			client.Close()
+			return nil, nil, fmt.Errorf("--pay-to %q is not a valid address", payToFlag)
+		}
+		payTo = common.HexToAddress(payToFlag)
+	}
+
+	gw := &x402.Gateway{
+		Token:      token.Bind(common.HexToAddress(tokenAddr), client),
+		Backend:    client,
+		Transactor: transactor,
+		PayTo:      payTo,
+		Price:      big.NewInt(price),
+		Network:    fmt.Sprintf("eip155:%s", chainID),
+		Commit:     nil, // real node: WaitMined polls for the receipt
+	}
+	return gw, func() { client.Close() }, nil
+}
+
+// remoteGateway delegates to a facilitator and touches neither RPC nor a key.
+// The payment terms still need the token address, network and payee.
+func remoteGateway(facilitatorURL, tokenAddr, network, payToFlag string, price int64) (*x402.Gateway, error) {
+	if network == "" {
+		return nil, fmt.Errorf("--network is required with --facilitator-url")
+	}
+	if payToFlag == "" || !common.IsHexAddress(payToFlag) {
+		return nil, fmt.Errorf("--pay-to must be a valid address with --facilitator-url")
+	}
+	gw := &x402.Gateway{
+		Token:       token.At(common.HexToAddress(tokenAddr)),
+		PayTo:       common.HexToAddress(payToFlag),
+		Price:       big.NewInt(price),
+		Network:     network,
+		Facilitator: &x402.RemoteFacilitator{BaseURL: facilitatorURL},
+	}
+	return gw, nil
+}
+
+func serve(server *http.Server) error {
 	errCh := make(chan error, 1)
 	go func() {
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {

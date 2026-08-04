@@ -26,6 +26,15 @@ type VerifyResult struct {
 	Payer         string `json:"payer,omitempty"`
 }
 
+// FacilitatorRequest is the shared JSON body of the /verify and /settle
+// endpoints, carrying the payment payload and the requirements to check it
+// against.
+type FacilitatorRequest struct {
+	X402Version         int                 `json:"x402Version"`
+	PaymentPayload      PaymentPayload      `json:"paymentPayload"`
+	PaymentRequirements PaymentRequirements `json:"paymentRequirements"`
+}
+
 // invalid builds a failed VerifyResult carrying a human-readable reason.
 func invalid(reason string) *VerifyResult {
 	return &VerifyResult{IsValid: false, InvalidReason: reason}
