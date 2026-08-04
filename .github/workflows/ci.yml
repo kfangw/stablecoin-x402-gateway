@@ -1,0 +1,78 @@
+# CI: formatting, static checks and the full test suite on every push and PR,
+# plus an end-to-end run against a live anvil node and a Docker image build.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs for the same ref to avoid wasting minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Format, vet, build and test. The e2e test skips here (E2E_RPC_URL is unset),
+  # so it runs exactly once, in the e2e job below.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          violations="$(gofmt -l .)"
+          if [ -n "$violations" ]; then
+            echo "gofmt violations:"
+            echo "$violations"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: go build
+        run: go build ./...
+      - name: go test
+        run: go test ./...
+
+  # End-to-end against a real node. Independent of the test job (no needs:), so
+  # they run in parallel.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start anvil
+        # Same foundry image and command as docker-compose.yml.
+        run: docker run -d --name anvil -p 8545:8545 --entrypoint anvil ghcr.io/foundry-rs/foundry:stable --host 0.0.0.0
+      - name: Wait for anvil
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf -X POST -H 'Content-Type: application/json' \
+              --data '{"jsonrpc":"2.0","method":"eth_chainId","id":1}' \
+              http://localhost:8545; then
+              echo
+              echo "anvil is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "anvil did not become ready in time" >&2
+          exit 1
+      - name: Run e2e
+        run: E2E_RPC_URL=http://localhost:8545 go test ./e2e/... -v -run E2E
+
+  # Verify the Dockerfile still builds and the compose file parses. Running the
+  # compose stack itself stays a local demo; the e2e job covers live behavior.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t stablecoin-x402-gateway:ci .
+      - name: Validate compose file
+        run: docker compose config -q
