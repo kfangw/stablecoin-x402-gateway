@@ -1,5 +1,7 @@
 # stablecoin-x402-gateway
 
+[![CI](https://github.com/kfangw/stablecoin-x402-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/kfangw/stablecoin-x402-gateway/actions/workflows/ci.yml)
+
 A single Go codebase that implements the issuance and distribution of a test stablecoin, an off-chain ledger reconciled against the chain, and x402 payment settlement for autonomous agents.
 
 The premise is twofold. A stablecoin backend lives or dies on the consistency between on-chain and off-chain state, and the next wave of traffic such infrastructure will serve is not only humans but autonomous AI agents. This repository puts the three roles involved, the issuer, the paying agent, and the settling gateway, into one runnable system with no external dependencies.
