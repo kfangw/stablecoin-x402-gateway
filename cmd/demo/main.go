@@ -94,7 +94,7 @@ func run() error {
 	gw := &x402.Gateway{
 		Token:       tok,
 		Backend:     client,
-		Facilitator: gatewayOpts,
+		Transactor:  gatewayOpts,
 		PayTo:       gatewayAddr,
 		Price:       big.NewInt(500), // 500 tKRW
 		Network:     fmt.Sprintf("eip155:%s", chainID),

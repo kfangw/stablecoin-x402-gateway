@@ -56,7 +56,7 @@ func run() error {
 	}
 	defer client.Close()
 
-	facilitator, gatewayAddr, err := nodeutil.TransactorFromEnv(gatewayKeyEnv, chainID)
+	transactor, gatewayAddr, err := nodeutil.TransactorFromEnv(gatewayKeyEnv, chainID)
 	if err != nil {
 		return err
 	}
@@ -71,13 +71,13 @@ func run() error {
 
 	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
 	gw := &x402.Gateway{
-		Token:       tok,
-		Backend:     client,
-		Facilitator: facilitator,
-		PayTo:       payTo,
-		Price:       big.NewInt(*price),
-		Network:     fmt.Sprintf("eip155:%s", chainID),
-		Commit:      nil, // real node: WaitMined polls for the receipt
+		Token:      tok,
+		Backend:    client,
+		Transactor: transactor,
+		PayTo:      payTo,
+		Price:      big.NewInt(*price),
+		Network:    fmt.Sprintf("eip155:%s", chainID),
+		Commit:     nil, // real node: WaitMined polls for the receipt
 	}
 
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

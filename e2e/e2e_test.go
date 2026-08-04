@@ -86,7 +86,7 @@ func TestE2EAgainstRealNode(t *testing.T) {
 	gw := &x402.Gateway{
 		Token:       tok,
 		Backend:     client,
-		Facilitator: gatewayOpts,
+		Transactor:  gatewayOpts,
 		PayTo:       gatewayAddr,
 		Price:       big.NewInt(price),
 		Network:     fmt.Sprintf("eip155:%s", chainID),

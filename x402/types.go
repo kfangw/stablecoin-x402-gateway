@@ -66,12 +66,15 @@ type PaymentPayload struct {
 }
 
 // SettlementResponse is the settlement result carried in the
-// X-PAYMENT-RESPONSE header.
+// X-PAYMENT-RESPONSE header and returned by the facilitator's settle endpoint.
 type SettlementResponse struct {
 	Success     bool   `json:"success"`
 	Transaction string `json:"transaction"`
 	Network     string `json:"network"`
 	Payer       string `json:"payer"`
+	// ErrorReason explains a Success=false outcome (for example a reverted
+	// settlement). It is omitted on success.
+	ErrorReason string `json:"errorReason,omitempty"`
 }
 
 // HeaderPayment and HeaderPaymentResponse are the HTTP header names used by x402.
