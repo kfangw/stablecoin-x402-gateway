@@ -46,6 +46,10 @@ type Gateway struct {
 	Facilitator Facilitator
 	facOnce     sync.Once
 
+	// Policy decides whether to approve a payment before settlement. If nil,
+	// AlwaysVerify is used, which approves exactly when verification passed.
+	Policy Policy
+
 	mu          sync.Mutex
 	Settlements []SettlementRecord
 }
@@ -79,6 +83,14 @@ func (g *Gateway) timeout() time.Duration {
 		return 60 * time.Second
 	}
 	return g.Timeout
+}
+
+// policy returns the configured accept policy, defaulting to AlwaysVerify.
+func (g *Gateway) policy() Policy {
+	if g.Policy != nil {
+		return g.Policy
+	}
+	return AlwaysVerify{}
 }
 
 // facilitator returns the configured Facilitator, building a LocalFacilitator
@@ -156,7 +168,13 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	if err != nil {
 		return SettlementRecord{}, fmt.Sprintf("verification error: %v", err)
 	}
-	if vr == nil || !vr.IsValid {
+
+	// The accept decision is a swappable policy, evaluated before settlement.
+	// The default AlwaysVerify rejects exactly when verification failed, so the
+	// reason below matches the original behavior; a custom policy may reject a
+	// verified payment, in which case the fallback reason is used.
+	pc := PaymentContext{Payload: p, Requirements: reqs, Verification: vr}
+	if g.policy().Decide(ctx, pc) != ActionApprove {
 		reason := "payment verification failed"
 		if vr != nil && vr.InvalidReason != "" {
 			reason = vr.InvalidReason
