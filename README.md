@@ -127,6 +127,8 @@ go run ./cmd/gateway --facilitator-url http://localhost:8403 \
   --token $TOKEN --network eip155:31337 --pay-to <payee> --price 500               # no --rpc, no key
 ```
 
+**The accept decision is a policy.** Deployed payment systems differ in their accept rules: some approve optimistically before finality, some verify every payment, some release only after settlement. The gateway makes this rule an explicit, swappable component instead of hard-coded control flow; the default `AlwaysVerify` policy reproduces the original behavior, approving exactly when verification passed. The policy runs before settlement and only decides, so rejecting a payment stops it short of any on-chain transaction. This mirrors how x402 V2 exposes the release decision as a lifecycle hook.
+
 ## Scope and limitations
 
 This repository verifies protocol flows; it is not a production implementation. In particular:

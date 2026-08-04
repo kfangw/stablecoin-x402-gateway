@@ -47,6 +47,7 @@ Feature checklist of stablecoin-x402-gateway. The repository stays a flow-verifi
 
 ## Agent payments
 
+- [x] Pluggable accept-policy hook in the gateway, with the default policy reproducing the fixed always-verify rule
 - [ ] AP2-style mandates: user-signed delegations (limit, expiry, allowed payees) verified by the gateway, making the agent's spending authority checkable by the counterparty
 - [ ] Payment sessions: one authorization covering many requests, settled periodically
 - [ ] Signed settlement receipts so the agent can prove payment to third parties
