@@ -1,0 +1,13 @@
+# Keep the build context small: only Go sources, go.mod/go.sum and docker/ are needed.
+.git
+.gitignore
+.idea
+.DS_Store
+.sandbox_deps
+node_modules
+contracts/node_modules
+dist
+*.md
+.claude
+package.json
+package-lock.json
