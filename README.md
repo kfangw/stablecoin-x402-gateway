@@ -85,11 +85,12 @@ contracts/         KRWTestStablecoin.sol: ERC-20 + issuer mint/burn + EIP-3009 +
 token/             contract deployment and calls (ABI and bytecode embedded)
 wallet/            key management and EIP-712 signing (TransferWithAuthorization)
 ledger/            issuance ledger indexed from Transfer events, reconciled against the chain
-x402/              the payment protocol: gateway (server, doubling as facilitator) and agent (client)
+x402/              the payment protocol: gateway (server), facilitator (verify/settle, local or remote), and agent (client)
 internal/nodeutil/ RPC dial and env-key transactor helpers shared by the binaries
 cmd/demo/          one-command demo of the whole flow on the simulated backend
 cmd/issuer/        issuer CLI: deploy, mint, reconcile against a real node
-cmd/gateway/       standalone x402 gateway server against a real node
+cmd/gateway/       standalone x402 gateway server (built-in or remote facilitator)
+cmd/facilitator/   facilitator HTTP service: verify, settle, supported
 cmd/agent/         paying agent CLI against a real node
 ```
 
@@ -105,12 +106,28 @@ cmd/agent/         paying agent CLI against a real node
 
 **One code path for both backends.** The simulated demo and the real node mode drive the same gateway, ledger, and token code. Three seams make that work. The gateway's `Backend` and the ledger's `LogReader` are interfaces that both the simulated backend and `ethclient.Client` satisfy. The gateway's `Commit` hook mines a block on the simulated backend and is left nil against a real node, where `bind.WaitMined` polls for the receipt instead. Chain ID and the x402 network string are read from the node rather than hardcoded. Nothing in the core packages knows which backend it runs on.
 
+**Splitting out the facilitator.** In the x402 model a resource server can delegate verification and settlement to a facilitator and never touch the chain. The gateway holds a `Facilitator` interface with two implementations: a local one that runs the off-chain checks and submits the transaction in-process, and a remote one that calls a facilitator over HTTP. With the remote facilitator the gateway needs neither an RPC connection nor a private key; it only builds the 402 terms and forwards the payment. The Compose stack is wired this way, so the split shows up in the topology: the settlement key lives on the facilitator service, and the gateway service holds no key at all.
+
+The facilitator HTTP service follows the shape of the public x402 facilitator spec:
+
+| Method | Path | Request | Response |
+|--------|------|---------|----------|
+| POST | `/verify` | `{x402Version, paymentPayload, paymentRequirements}` | `{isValid, invalidReason?, payer?}` (always 200; validity is a field, not a status) |
+| POST | `/settle` | same as `/verify` | `{success, transaction, network, payer, errorReason?}` (200 even on a reverted settlement; 5xx only on transport failure) |
+| GET | `/supported` | (none) | `{kinds:[{scheme, network}]}` |
+
+```bash
+go run ./cmd/facilitator --rpc http://localhost:8545 --token $TOKEN --listen :8403  # FACILITATOR_KEY pays gas
+go run ./cmd/gateway --facilitator-url http://localhost:8403 \
+  --token $TOKEN --network eip155:31337 --pay-to <payee> --price 500               # no --rpc, no key
+```
+
 ## Scope and limitations
 
 This repository verifies protocol flows; it is not a production implementation. In particular:
 
 - The contract is unaudited and the token uses zero decimals. Regulatory requirements such as reserve attestation, allowlists, and freezing are out of scope.
-- The gateway and the facilitator run in one process. Production x402 deployments can split verification and settlement into a separate facilitator service.
+- The gateway can run the facilitator in-process or delegate to a remote one, but the facilitator itself is a single instance with no authentication, rate limiting, or horizontal scaling.
 - The ledger is in-memory and rescans from genesis. At production scale this calls for incremental indexing, durable storage, and reorg handling.
 - Keys are supplied via environment variables and live in process memory; production deployments assume KMS or HSM custody.
 
