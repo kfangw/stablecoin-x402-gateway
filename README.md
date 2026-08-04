@@ -23,15 +23,57 @@ go test ./...
 6. Defend     replaying the same signature is rejected
 ```
 
+## Real node mode
+
+The same code runs against a real RPC node (anvil or a testnet) with the issuer,
+gateway, and agent as separate processes. The simulated demo above stays as is.
+
+```bash
+# terminal 1: local node
+anvil
+
+# terminal 2: issuer deploys the token and mints to the agent
+export ISSUER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80  # anvil key #0
+TOKEN=$(go run ./cmd/issuer deploy --rpc http://localhost:8545 | tail -1)
+go run ./cmd/issuer mint --rpc http://localhost:8545 --token $TOKEN \
+  --to <agent address> --amount 100000
+
+# terminal 3: gateway
+export GATEWAY_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d  # anvil key #1
+go run ./cmd/gateway --rpc http://localhost:8545 --token $TOKEN \
+  --listen :8402 --price 500
+
+# terminal 4: agent pays for the resource
+export AGENT_KEY=<agent private key>
+go run ./cmd/agent --rpc http://localhost:8545 --token $TOKEN \
+  --max 1000 http://localhost:8402/premium/report
+
+# reconcile the off-chain ledger against the node
+go run ./cmd/issuer reconcile --rpc http://localhost:8545 --token $TOKEN
+```
+
+Keys are passed through environment variables (ISSUER_KEY, GATEWAY_KEY,
+AGENT_KEY), not flags, so they never appear in a process listing. The end-to-end
+test in `e2e/` runs this flow against a live node when `E2E_RPC_URL` is set and
+skips otherwise:
+
+```bash
+E2E_RPC_URL=http://localhost:8545 go test ./... -run E2E
+```
+
 ## Layout
 
 ```
-contracts/   KRWTestStablecoin.sol: ERC-20 + issuer mint/burn + EIP-3009 + Pausable + two-step issuer handover
-token/       contract deployment and calls (ABI and bytecode embedded)
-wallet/      key management and EIP-712 signing (TransferWithAuthorization)
-ledger/      issuance ledger indexed from Transfer events, reconciled against the chain
-x402/        the payment protocol: gateway (server, doubling as facilitator) and agent (client)
-cmd/demo/    one-command demo of the whole flow
+contracts/         KRWTestStablecoin.sol: ERC-20 + issuer mint/burn + EIP-3009 + Pausable + two-step issuer handover
+token/             contract deployment and calls (ABI and bytecode embedded)
+wallet/            key management and EIP-712 signing (TransferWithAuthorization)
+ledger/            issuance ledger indexed from Transfer events, reconciled against the chain
+x402/              the payment protocol: gateway (server, doubling as facilitator) and agent (client)
+internal/nodeutil/ RPC dial and env-key transactor helpers shared by the binaries
+cmd/demo/          one-command demo of the whole flow on the simulated backend
+cmd/issuer/        issuer CLI: deploy, mint, reconcile against a real node
+cmd/gateway/       standalone x402 gateway server against a real node
+cmd/agent/         paying agent CLI against a real node
 ```
 
 ## Design notes
@@ -44,6 +86,8 @@ cmd/demo/    one-command demo of the whole flow
 
 **The agent's delegation limit.** The agent refuses payment terms above its delegated limit (MaxAmount). It is a minimal illustration of where a safety boundary belongs when payment authority is delegated to an autonomous agent.
 
+**One code path for both backends.** The simulated demo and the real node mode drive the same gateway, ledger, and token code. Three seams make that work. The gateway's `Backend` and the ledger's `LogReader` are interfaces that both the simulated backend and `ethclient.Client` satisfy. The gateway's `Commit` hook mines a block on the simulated backend and is left nil against a real node, where `bind.WaitMined` polls for the receipt instead. Chain ID and the x402 network string are read from the node rather than hardcoded. Nothing in the core packages knows which backend it runs on.
+
 ## Scope and limitations
 
 This repository verifies protocol flows; it is not a production implementation. In particular:
@@ -51,7 +95,7 @@ This repository verifies protocol flows; it is not a production implementation. 
 - The contract is unaudited and the token uses zero decimals. Regulatory requirements such as reserve attestation, allowlists, and freezing are out of scope.
 - The gateway and the facilitator run in one process. Production x402 deployments can split verification and settlement into a separate facilitator service.
 - The ledger is in-memory and rescans from genesis. At production scale this calls for incremental indexing, durable storage, and reorg handling.
-- Keys live in process memory. Production deployments assume KMS or HSM custody.
+- Keys are supplied via environment variables and live in process memory; production deployments assume KMS or HSM custody.
 
 ## References
 
