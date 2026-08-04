@@ -7,6 +7,17 @@ set -eu
 RPC="${RPC_URL:-http://anvil:8545}"
 ADDR_FILE="${TOKEN_ADDR_FILE:-/shared/token.addr}"
 
+# Idempotent: if a token address was already published to the shared volume,
+# reuse it. Compose re-runs this one-shot service when a later `docker compose
+# run agent` pulls in its dependencies; without this guard the re-run would
+# deploy a second token and overwrite the address, desyncing the agent (new
+# token) from the already-running gateway and facilitator (old token). The
+# volume is cleared by `docker compose down -v`, which forces a fresh deploy.
+if [ -s "${ADDR_FILE}" ]; then
+	echo "init: token already deployed at $(cat "${ADDR_FILE}"), nothing to do"
+	exit 0
+fi
+
 echo "init: deploying tKRW on ${RPC}"
 # issuer deploy prints the token address on its final stdout line.
 TOKEN="$(issuer deploy --rpc "${RPC}" | tail -n 1)"
