@@ -67,18 +67,21 @@ E2E_RPC_URL=http://localhost:8545 go test ./... -run E2E
 
 The four-terminal scenario above is packaged as a Compose stack. `up` starts an
 anvil node, runs a one-shot init service that deploys the token and mints to the
-agent, and starts the gateway. The agent is a separate `run` step.
+agent, then starts the facilitator and the gateway. The gateway runs in remote
+mode and holds no key: the facilitator settles on-chain and pays the gas. The
+agent is a separate `run` step.
 
 ```bash
-docker compose up -d              # anvil + token deploy/mint + gateway
+docker compose up -d              # anvil + token deploy/mint + facilitator + gateway
 curl -s localhost:8402/premium/report   # 402 with the payment terms
 docker compose run --rm agent     # pays: HTTP 200, 500 tKRW, settlement tx
 docker compose down -v            # tear down (removes the shared volume)
 ```
 
 The init service publishes the deployed token address to a shared volume, which
-the gateway and agent read, so no address needs to be copied by hand. The keys
-are the publicly known anvil development accounts and hold no real funds.
+the facilitator, gateway, and agent read, so no address needs to be copied by
+hand. Issuance is idempotent, so re-running the stack reuses a single token. The
+keys are the publicly known anvil development accounts and hold no real funds.
 
 ## Layout
 
@@ -132,6 +135,10 @@ This repository verifies protocol flows; it is not a production implementation. 
 - The gateway can run the facilitator in-process or delegate to a remote one, but the facilitator itself is a single instance with no authentication, rate limiting, or horizontal scaling.
 - The ledger is in-memory and rescans from genesis. At production scale this calls for incremental indexing, durable storage, and reorg handling.
 - Keys are supplied via environment variables and live in process memory; production deployments assume KMS or HSM custody.
+
+## Roadmap
+
+[ROADMAP.md](ROADMAP.md) tracks what is built and what is planned, grouped by area.
 
 ## References
 
