@@ -148,6 +148,10 @@ This repository verifies protocol flows; it is not a production implementation. 
 - EIP-3009: https://eips.ethereum.org/EIPS/eip-3009
 - EIP-712: https://eips.ethereum.org/EIPS/eip-712
 
+## Development notes
+
+The initial version of this repository was built in a focused two-day sprint (August 3 to 4, 2026) and it keeps evolving; ROADMAP.md tracks what comes next. I used AI coding tools throughout the sprint. The architecture, the verification order, and the test scenarios are my design decisions, and I reviewed every change before it landed. The commit history is organized into logical steps for readability; it is not a minute-by-minute record of the work.
+
 ## License
 
 MIT
