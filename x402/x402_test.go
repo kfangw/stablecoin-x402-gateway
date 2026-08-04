@@ -73,13 +73,13 @@ func newFixture(t *testing.T, price int64, payerFunds int64) *fixture {
 	}
 
 	gw := &x402.Gateway{
-		Token:       tok,
-		Backend:     client,
-		Transactor:  gatewayOpts,
-		PayTo:       gatewayAddr,
-		Price:       big.NewInt(price),
-		Network:     fmt.Sprintf("eip155:%s", chainID),
-		Commit:      func() { sim.Commit() },
+		Token:      tok,
+		Backend:    client,
+		Transactor: gatewayOpts,
+		PayTo:      gatewayAddr,
+		Price:      big.NewInt(price),
+		Network:    fmt.Sprintf("eip155:%s", chainID),
+		Commit:     func() { sim.Commit() },
 	}
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"data":"premium"}`)

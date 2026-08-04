@@ -92,13 +92,13 @@ func run() error {
 
 	fmt.Println("== 2. Gateway: protect a paid resource with x402 ==")
 	gw := &x402.Gateway{
-		Token:       tok,
-		Backend:     client,
-		Transactor:  gatewayOpts,
-		PayTo:       gatewayAddr,
-		Price:       big.NewInt(500), // 500 tKRW
-		Network:     fmt.Sprintf("eip155:%s", chainID),
-		Commit:      func() { sim.Commit() },
+		Token:      tok,
+		Backend:    client,
+		Transactor: gatewayOpts,
+		PayTo:      gatewayAddr,
+		Price:      big.NewInt(500), // 500 tKRW
+		Network:    fmt.Sprintf("eip155:%s", chainID),
+		Commit:     func() { sim.Commit() },
 	}
 	report := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

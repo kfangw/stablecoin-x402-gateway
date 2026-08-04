@@ -84,13 +84,13 @@ func TestE2EAgainstRealNode(t *testing.T) {
 	// Gateway: Commit nil, so WaitMined polls the node for the receipt.
 	const price = 500
 	gw := &x402.Gateway{
-		Token:       tok,
-		Backend:     client,
-		Transactor:  gatewayOpts,
-		PayTo:       gatewayAddr,
-		Price:       big.NewInt(price),
-		Network:     fmt.Sprintf("eip155:%s", chainID),
-		Commit:      nil,
+		Token:      tok,
+		Backend:    client,
+		Transactor: gatewayOpts,
+		PayTo:      gatewayAddr,
+		Price:      big.NewInt(price),
+		Network:    fmt.Sprintf("eip155:%s", chainID),
+		Commit:     nil,
 	}
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"report":"market report body","paid":true}`)
