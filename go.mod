@@ -1,21 +1,13 @@
 module github.com/kfangw/stablecoin-x402-gateway
 
-go 1.22
-
-
-
-
-
-
-
-
-
-
+go 1.25.0
 
 require github.com/ethereum/go-ethereum v1.14.13
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
+	github.com/Microsoft/go-winio v0.6.2 // indirect
+	github.com/StackExchange/wmi v1.2.1 // indirect
 	github.com/VictoriaMetrics/fastcache v1.12.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.13.0 // indirect
@@ -38,6 +30,7 @@ require (
 	github.com/ethereum/go-verkle v0.1.1-0.20240829091221-dffa7562dbe9 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/getsentry/sentry-go v0.27.0 // indirect
+	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/gofrs/flock v0.8.1 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang-jwt/jwt/v4 v4.5.1 // indirect
@@ -51,6 +44,7 @@ require (
 	github.com/holiman/uint256 v1.3.1 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
+	github.com/klauspost/compress v1.16.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
