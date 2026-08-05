@@ -34,10 +34,10 @@ Feature checklist of stablecoin-x402-gateway. The repository stays a flow-verifi
 ## Operations and consistency
 
 - [x] Continuous integration: gofmt, `go vet`, build and tests on every push, the e2e suite against anvil, and a Docker build check
-- [ ] Incremental ledger indexing from the last processed block, keeping the full rescan as the verification path
+- [x] Incremental ledger indexing from the last processed block, keeping the full rescan as the verification path
 - [ ] Machine-readable error codes in 402 responses alongside human-readable messages
 - [ ] Metrics, structured logging, and health endpoints for the gateway
-- [ ] Reorg handling in the ledger: finality depth and rollback
+- [x] Reorg handling in the ledger: finality depth and rollback
 - [ ] Durable settlement journal with an outbox pattern and crash-recovery tests
 - [ ] Settlement event publishing to Kafka from the outbox
 - [ ] Gateway throughput and latency benchmarks
