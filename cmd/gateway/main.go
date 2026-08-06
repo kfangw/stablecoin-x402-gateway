@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,6 +47,9 @@ func run() error {
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
 	facilitatorURL := fs.String("facilitator-url", "", "delegate verify/settle to this facilitator (no RPC or key needed)")
 	network := fs.String("network", "", "x402 network string, e.g. eip155:31337 (required with --facilitator-url)")
+	journalPath := fs.String("journal", "", "durable settlement journal file (default: disabled, settlements kept in memory)")
+	kafkaBrokers := fs.String("kafka-brokers", "", "comma-separated Kafka brokers to publish settlements to (requires --journal)")
+	kafkaTopic := fs.String("kafka-topic", "settlements", "Kafka topic for settlement events")
 	fs.Parse(os.Args[1:])
 
 	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
@@ -53,6 +57,9 @@ func run() error {
 	}
 	if *price <= 0 {
 		return fmt.Errorf("--price must be positive")
+	}
+	if *kafkaBrokers != "" && *journalPath == "" {
+		return fmt.Errorf("--kafka-brokers requires --journal (the outbox publishes from the journal)")
 	}
 
 	var (
@@ -70,6 +77,17 @@ func run() error {
 	}
 	if cleanup != nil {
 		defer cleanup()
+	}
+
+	// Optional durability: journal every settlement before answering, and (if
+	// brokers are given) publish from the journal through an outbox. Both are
+	// off by default, so the demo and existing runs are unchanged.
+	if *journalPath != "" {
+		stopOutbox, err := attachJournal(gw, *journalPath, *kafkaBrokers, *kafkaTopic)
+		if err != nil {
+			return err
+		}
+		defer stopOutbox()
 	}
 
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +160,42 @@ func remoteGateway(facilitatorURL, tokenAddr, network, payToFlag string, price i
 		Facilitator: &x402.RemoteFacilitator{BaseURL: facilitatorURL},
 	}
 	return gw, nil
+}
+
+// attachJournal opens the settlement journal, restores the gateway's
+// settlements from it, and, when Kafka brokers are configured, starts an outbox
+// that publishes journaled settlements. It returns a stop function that cancels
+// the outbox and closes the sink and journal.
+func attachJournal(gw *x402.Gateway, path, brokers, topic string) (func(), error) {
+	journal, err := x402.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	gw.AttachJournal(journal)
+
+	if brokers == "" {
+		log.Printf("settlement journal at %s (publishing disabled)", path)
+		return func() { journal.Close() }, nil
+	}
+
+	sink, err := x402.NewKafkaSink(strings.Split(brokers, ","), topic)
+	if err != nil {
+		journal.Close()
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		(&x402.Outbox{Journal: journal, Sink: sink}).Run(ctx)
+		close(done)
+	}()
+	log.Printf("settlement journal at %s, publishing to Kafka %s topic %q", path, brokers, topic)
+	return func() {
+		cancel()
+		<-done
+		sink.Close()
+		journal.Close()
+	}, nil
 }
 
 func serve(server *http.Server) error {
