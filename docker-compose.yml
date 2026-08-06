@@ -1,7 +1,8 @@
 # Docker Compose stack that reproduces the real-node scenario end to end:
-# an anvil node, a one-shot token deployment and mint, a facilitator, and the
-# x402 gateway. `docker compose up` brings up anvil + init + facilitator +
-# gateway; `docker compose run --rm agent` performs a payment.
+# an anvil node, a one-shot token deployment and mint, a facilitator, a
+# redpanda broker, and the x402 gateway. `docker compose up` brings up
+# anvil + init + facilitator + redpanda + gateway; `docker compose run --rm
+# agent` performs a payment, which the gateway journals and publishes.
 #
 # The gateway runs in remote mode: it delegates verification and settlement to
 # the facilitator and holds neither an RPC connection nor a key. The settlement
@@ -53,7 +54,32 @@ services:
     volumes:
       - shared:/shared
 
+  # Kafka-API-compatible broker in a single container (no ZooKeeper), which
+  # suits the demo stack. Kafka API compatible; swap in a Kafka cluster in
+  # production. The gateway's outbox publishes settlement events here.
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=512M
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
   # Remote mode: no RPC, no key. Delegates verify/settle to the facilitator.
+  # It journals settlements to the shared volume and publishes them to redpanda.
   gateway:
     image: stablecoin-x402-gateway:local
     depends_on:
@@ -61,10 +87,14 @@ services:
         condition: service_completed_successfully
       facilitator:
         condition: service_started
+      redpanda:
+        condition: service_healthy
     environment:
       FACILITATOR_URL: http://facilitator:8403
       NETWORK: eip155:31337 # anvil default chain id
       PAYTO: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" # anvil account #3 (payment recipient)
+      JOURNAL_PATH: /shared/settlements.jsonl
+      KAFKA_BROKERS: redpanda:9092
     entrypoint: ["entrypoint-gateway.sh"]
     ports:
       - "8402:8402"

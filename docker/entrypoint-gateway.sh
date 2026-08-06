@@ -21,5 +21,15 @@ done
 
 TOKEN="$(cat "${ADDR_FILE}")"
 echo "gateway: starting against token ${TOKEN}, facilitator ${FACILITATOR_URL}"
-exec gateway --token "${TOKEN}" --listen :8402 --price 500 \
+
+# Optional durability: JOURNAL_PATH persists settlements, KAFKA_BROKERS publishes
+# them through the outbox. Both stay off when their variables are unset.
+set -- --token "${TOKEN}" --listen :8402 --price 500 \
 	--facilitator-url "${FACILITATOR_URL}" --network "${NETWORK}" --pay-to "${PAYTO}"
+if [ -n "${JOURNAL_PATH:-}" ]; then
+	set -- "$@" --journal "${JOURNAL_PATH}"
+fi
+if [ -n "${KAFKA_BROKERS:-}" ]; then
+	set -- "$@" --kafka-brokers "${KAFKA_BROKERS}"
+fi
+exec gateway "$@"
