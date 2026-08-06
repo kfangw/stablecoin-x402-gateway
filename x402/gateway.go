@@ -50,6 +50,11 @@ type Gateway struct {
 	// AlwaysVerify is used, which approves exactly when verification passed.
 	Policy Policy
 
+	// Journal, if set, durably records each settlement before the gateway
+	// answers, so settlements survive a crash and an outbox can publish them.
+	// When nil the gateway keeps its original in-memory-only behavior.
+	Journal *Journal
+
 	mu          sync.Mutex
 	Settlements []SettlementRecord
 }
@@ -205,8 +210,47 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 		TxHash: common.HexToHash(sr.Transaction),
 		Time:   time.Now(),
 	}
+	// Persist to the journal before the response goes out: the settlement is
+	// durable by the time the caller learns it succeeded. The journal is the
+	// source of truth; the in-memory slice mirrors it for callers that read it.
+	if g.Journal != nil {
+		if err := g.Journal.Append(g.journalEntry(record)); err != nil {
+			return SettlementRecord{}, fmt.Sprintf("journal settlement: %v", err)
+		}
+	}
 	g.mu.Lock()
 	g.Settlements = append(g.Settlements, record)
 	g.mu.Unlock()
 	return record, ""
+}
+
+// journalEntry projects a settlement record into its durable journal form.
+func (g *Gateway) journalEntry(r SettlementRecord) JournalEntry {
+	tx := r.TxHash.Hex()
+	return JournalEntry{
+		ID:      tx, // settlement tx hash: unique and idempotent
+		Payer:   r.Payer.Hex(),
+		Amount:  r.Amount.String(),
+		TxHash:  tx,
+		Network: g.Network,
+		At:      r.Time.Unix(),
+	}
+}
+
+// AttachJournal sets the settlement journal and rebuilds Settlements from it, so
+// a gateway restarted after a crash recovers the settlements recorded before it.
+func (g *Gateway) AttachJournal(j *Journal) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.Journal = j
+	g.Settlements = g.Settlements[:0]
+	for _, e := range j.Entries() {
+		amount, _ := new(big.Int).SetString(e.Amount, 10)
+		g.Settlements = append(g.Settlements, SettlementRecord{
+			Payer:  common.HexToAddress(e.Payer),
+			Amount: amount,
+			TxHash: common.HexToHash(e.TxHash),
+			Time:   time.Unix(e.At, 0),
+		})
+	}
 }
