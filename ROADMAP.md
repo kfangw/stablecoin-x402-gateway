@@ -66,8 +66,8 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] Incremental ledger indexing from the last processed block, keeping the full rescan as the verification path
 - [x] Reorg handling in the ledger: finality depth and rollback
 - [ ] Metrics, structured logging, and health endpoints for the gateway
-- [ ] Durable settlement journal with an outbox pattern and crash-recovery tests
-- [ ] Settlement event publishing to Kafka from the outbox
+- [x] Durable settlement journal with an outbox pattern and crash-recovery tests
+- [x] Settlement event publishing to Kafka from the outbox
 - [ ] Gateway throughput and latency benchmarks
 - [ ] Fuzz tests for payment header parsing
 - [ ] Static analysis of the contract in CI

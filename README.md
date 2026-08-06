@@ -67,14 +67,16 @@ E2E_RPC_URL=http://localhost:8545 go test ./... -run E2E
 
 The four-terminal scenario above is packaged as a Compose stack. `up` starts an
 anvil node, runs a one-shot init service that deploys the token and mints to the
-agent, then starts the facilitator and the gateway. The gateway runs in remote
-mode and holds no key: the facilitator settles on-chain and pays the gas. The
-agent is a separate `run` step.
+agent, then starts a redpanda broker, the facilitator, and the gateway. The
+gateway runs in remote mode and holds no key: the facilitator settles on-chain
+and pays the gas. The gateway journals each settlement to the shared volume and
+publishes it to redpanda. The agent is a separate `run` step.
 
 ```bash
-docker compose up -d              # anvil + token deploy/mint + facilitator + gateway
+docker compose up -d              # anvil + token deploy/mint + redpanda + facilitator + gateway
 curl -s localhost:8402/premium/report   # 402 with the payment terms
 docker compose run --rm agent     # pays: HTTP 200, 500 tKRW, settlement tx
+docker compose exec redpanda rpk topic consume settlements -n 1   # the published settlement event
 docker compose down -v            # tear down (removes the shared volume)
 ```
 
@@ -130,6 +132,8 @@ go run ./cmd/gateway --facilitator-url http://localhost:8403 \
 ```
 
 **The accept decision is a policy.** Deployed payment systems differ in their accept rules: some approve optimistically before finality, some verify every payment, some release only after settlement. The gateway makes this rule an explicit, swappable component instead of hard-coded control flow; the default `AlwaysVerify` policy reproduces the original behavior, approving exactly when verification passed. The policy runs before settlement and only decides, so rejecting a payment stops it short of any on-chain transaction. This mirrors how x402 V2 exposes the release decision as a lifecycle hook.
+
+**Durable settlement journal and outbox.** Without a journal the gateway keeps settlements only in memory, so a crash loses the record of what it settled. With `--journal` the gateway writes each settlement to an append-only, fsynced JSONL file before it answers the request, so the settlement is durable by the time the caller learns it succeeded; on restart the file replays to rebuild the in-memory view, and a torn final line from a crash mid-write is dropped. Publishing then follows the outbox pattern: a separate loop scans the journal and delivers unpublished settlements through a `Sink`, marking each published only after the sink acknowledges it. The default sink (`--kafka-brokers`) produces to a Kafka topic, keyed by the settlement transaction hash. Delivery is at-least-once by construction, since a crash between the produce and the marker redelivers the event, so consumers deduplicate on that hash. Journaling and publishing are both opt-in; without the flags every existing path runs unchanged.
 
 ## Scope and limitations
 
