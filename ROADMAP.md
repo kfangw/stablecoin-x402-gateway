@@ -38,14 +38,19 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 
 - [x] Pluggable accept-policy hook in the gateway, with the default policy reproducing the fixed always-verify rule
 - [ ] AP2-style mandates: user-signed delegations (limit, expiry, allowed payees and resources) carried with the payment and verified by the gateway, making the agent's spending authority checkable by the counterparty
+- [ ] Mandate revocation: the delegator withdraws a mandate before its expiry, and the gateway rejects payments made under a revoked mandate
 - [ ] Ask action: for a payment beyond the mandate, the gateway answers "confirm with your delegator" instead of rejecting; the agent obtains confirmation and retries
+- [ ] Delegator command: signs, renews, and revokes mandates and answers confirmation requests, giving the delegation side of the flow a concrete actor
 - [ ] Agent-side grant policy hook: a pluggable rule for when to pay autonomously and when to ask, with a simulation harness for comparing policies
+- [ ] Table-driven accept and grant policies loaded from a file, giving the harness a nontrivial policy pair to compare against the built-in rules
+- [ ] Traffic and adversary generators for the simulation harness, with metrics comparing policies on acceptance, losses, and escalations
 - [ ] Payment sessions: one authorization covering many requests, settled periodically
 - [ ] Resource discovery endpoint listing paid resources
 
 ## Asset delivery — M3
 
 - [ ] Mock RWA token contract; the gateway delivers the asset to the payer after settlement (two-transaction flow)
+- [ ] Refund path for the two-transaction flow: a delivery failure after settlement produces a recorded refund transfer instead of a silent loss
 - [ ] Atomic DvP contract: settlement and delivery in a single transaction
 - [ ] Eligibility registry (ERC-3643-inspired allowlist) checked before delivery, with a minimal form of delegator-to-agent eligibility inheritance
 - [ ] Freeze and allowlist controls on tKRW reflecting regulatory requirements
@@ -54,11 +59,13 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 ## Auditability and reserves — M4
 
 - [ ] Signed settlement receipts: the gateway signs a receipt linking the mandate, the settlement transaction, and invoice fields, so the delegation-to-delivery chain verifies offline
+- [ ] Audit command: verifies a receipt offline end to end, from the mandate signature and its revocation status to the settlement transaction and the asset delivery, and can consume published settlement events as its input
 - [ ] Reserve policy: minting bounded by an off-chain reserve ledger, with the reserve invariant added to reconciliation
 - [ ] Redemption flow: signature-based redemption requests settled by issuer burn
 - [ ] `receiveWithAuthorization` to close the front-running window of `transferWithAuthorization`
 - [ ] Public testnet deployment using the deployed ERC-8004 registries, with a scripted one-command demo of the full scenario
 - [ ] Architecture diagram in the README
+- [ ] Trust assumptions in the README: what each party could forge, steal, or censor, and which check stops it
 
 ## Operations and consistency
 
@@ -76,5 +83,5 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 
 - [ ] Validator economics: stake-backed validation with contract-level slashing tied to a validation registry
 - [ ] Evaluation harness: mock settlement and on-chain settlement swappable behind the existing backend seam, with metrics for manipulation resistance and settlement integrity
-- [ ] On-chain predicate verifier (E ⊨ P) as an accept policy: execution evidence checked against a user-signed specification
+- [ ] On-chain verifier as an accept policy: execution evidence checked on chain against a user-signed specification
 - [ ] Permissioned-chain profile (Besu QBFT or OP Stack devnet) for the full STO-style testbed
