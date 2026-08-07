@@ -21,16 +21,19 @@ import (
 
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/ledger"
+	"github.com/kfangw/stablecoin-x402-gateway/registry"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 	"github.com/kfangw/stablecoin-x402-gateway/wallet"
 	"github.com/kfangw/stablecoin-x402-gateway/x402"
 )
 
-// Public development keys shipped by anvil (accounts #0 and #1). They are widely
-// published and hold value only on throwaway local chains; never reuse them.
+// Public development keys shipped by anvil (accounts #0, #1, and #2). They are
+// widely published and hold value only on throwaway local chains; never reuse
+// them.
 const (
 	anvilKey0 = "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
 	anvilKey1 = "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	anvilKey2 = "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
 )
 
 func TestE2EAgainstRealNode(t *testing.T) {
@@ -144,5 +147,104 @@ func TestE2EAgainstRealNode(t *testing.T) {
 	}
 	if !rep.OK() {
 		t.Errorf("reconciliation mismatches: %v", rep.Mismatches)
+	}
+}
+
+// TestE2EIdentityAgainstRealNode runs the identity milestone end to end against
+// a live node: an unregistered agent is refused with identity_unregistered, and
+// after it registers the same payment settles.
+func TestE2EIdentityAgainstRealNode(t *testing.T) {
+	rpcURL := os.Getenv("E2E_RPC_URL")
+	if rpcURL == "" {
+		t.Skip("E2E_RPC_URL not set; skipping live-node end-to-end test")
+	}
+
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, rpcURL)
+	if err != nil {
+		t.Fatalf("dial %s: %v", rpcURL, err)
+	}
+	defer client.Close()
+
+	issuerKey, _ := crypto.HexToECDSA(anvilKey0)
+	gatewayKey, _ := crypto.HexToECDSA(anvilKey1)
+	// The agent registers itself, which is a transaction, so it uses a
+	// pre-funded anvil account rather than a fresh keyless wallet.
+	agentKey, _ := crypto.HexToECDSA(anvilKey2)
+	issuerOpts, _ := bind.NewKeyedTransactorWithChainID(issuerKey, chainID)
+	gatewayOpts, _ := bind.NewKeyedTransactorWithChainID(gatewayKey, chainID)
+	agentOpts, _ := bind.NewKeyedTransactorWithChainID(agentKey, chainID)
+	gatewayAddr := crypto.PubkeyToAddress(gatewayKey.PublicKey)
+	agentWallet := wallet.FromKey(agentKey)
+
+	tok, deployTx, err := token.Deploy(issuerOpts, client)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if _, err := bind.WaitDeployed(ctx, client, deployTx); err != nil {
+		t.Fatalf("wait deploy: %v", err)
+	}
+	mintTx, err := tok.Mint(issuerOpts, agentWallet.Address, big.NewInt(10_000))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, mintTx); err != nil {
+		t.Fatalf("wait mint: %v", err)
+	}
+
+	reg, regTx, err := registry.Deploy(issuerOpts, client)
+	if err != nil {
+		t.Fatalf("deploy registry: %v", err)
+	}
+	if _, err := bind.WaitDeployed(ctx, client, regTx); err != nil {
+		t.Fatalf("wait registry: %v", err)
+	}
+
+	gw := &x402.Gateway{
+		Token:      tok,
+		Backend:    client,
+		Transactor: gatewayOpts,
+		PayTo:      gatewayAddr,
+		Price:      big.NewInt(500),
+		Network:    fmt.Sprintf("eip155:%s", chainID),
+		Commit:     nil,
+		Policy:     x402.Chain{x402.AlwaysVerify{}, x402.IdentityPolicy{Registry: reg}},
+	}
+	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"report":"market report body","paid":true}`)
+	})
+	server := httptest.NewServer(gw.Middleware(resource))
+	defer server.Close()
+
+	domain, err := tok.DomainSeparator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &x402.Agent{Wallet: agentWallet, DomainSeparator: domain, MaxAmount: big.NewInt(1000)}
+
+	// Unregistered: refused with identity_unregistered.
+	refused, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		t.Fatalf("agent get (unregistered): %v", err)
+	}
+	if refused.StatusCode != http.StatusPaymentRequired || refused.ErrorCode != x402.ErrCodeIdentityUnregistered {
+		t.Fatalf("unregistered = %d %q, want 402 identity_unregistered", refused.StatusCode, refused.ErrorCode)
+	}
+
+	// Register, then retry: the payment settles.
+	registerTx, err := reg.Register(agentOpts, "https://cards.example/e2e-agent")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, registerTx); err != nil {
+		t.Fatalf("wait register: %v", err)
+	}
+
+	result, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		t.Fatalf("agent get (registered): %v", err)
+	}
+	if result.StatusCode != http.StatusOK || !result.Paid {
+		t.Fatalf("registered = %d paid=%v, want 200 paid", result.StatusCode, result.Paid)
 	}
 }

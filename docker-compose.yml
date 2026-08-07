@@ -25,7 +25,8 @@ services:
       timeout: 4s
       retries: 20
 
-  # One-shot: deploy the token, mint to the agent, publish the address.
+  # One-shot: deploy the token and identity registry, mint to the agent,
+  # publish both addresses.
   init:
     build: .
     image: stablecoin-x402-gateway:local
@@ -90,6 +91,7 @@ services:
       redpanda:
         condition: service_healthy
     environment:
+      RPC_URL: http://anvil:8545 # read-only: identity registry lookups (no key)
       FACILITATOR_URL: http://facilitator:8403
       NETWORK: eip155:31337 # anvil default chain id
       PAYTO: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" # anvil account #3 (payment recipient)

@@ -5,9 +5,11 @@
 set -eu
 
 ADDR_FILE="${TOKEN_ADDR_FILE:-/shared/token.addr}"
+REGISTRY_FILE="${REGISTRY_ADDR_FILE:-/shared/registry.addr}"
 FACILITATOR_URL="${FACILITATOR_URL:-http://facilitator:8403}"
 NETWORK="${NETWORK:-eip155:31337}"
 PAYTO="${PAYTO:?PAYTO (payee address) is required}"
+RPC="${RPC_URL:-http://anvil:8545}"
 
 i=0
 while [ ! -s "${ADDR_FILE}" ]; do
@@ -31,5 +33,10 @@ if [ -n "${JOURNAL_PATH:-}" ]; then
 fi
 if [ -n "${KAFKA_BROKERS:-}" ]; then
 	set -- "$@" --kafka-brokers "${KAFKA_BROKERS}"
+fi
+# Identity policy: reject unregistered agents. The gateway holds no key; the RPC
+# is used read-only for registry lookups.
+if [ -s "${REGISTRY_FILE}" ]; then
+	set -- "$@" --identity-registry "$(cat "${REGISTRY_FILE}")" --rpc "${RPC}"
 fi
 exec gateway "$@"

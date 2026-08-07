@@ -22,9 +22,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
+	"github.com/kfangw/stablecoin-x402-gateway/registry"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 	"github.com/kfangw/stablecoin-x402-gateway/x402"
 )
@@ -40,8 +43,9 @@ func main() {
 
 func run() error {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
-	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint (local mode)")
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint: local mode settlement, or read-only identity lookups in remote mode")
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
+	identityRegistry := fs.String("identity-registry", "", "identity registry address; when set, unregistered agents are rejected")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
@@ -64,19 +68,33 @@ func run() error {
 
 	var (
 		gw      *x402.Gateway
+		client  *ethclient.Client // set in local mode; nil with a remote facilitator
 		cleanup func()
 		err     error
 	)
 	if *facilitatorURL != "" {
 		gw, err = remoteGateway(*facilitatorURL, *tokenAddr, *network, *payToFlag, *price)
 	} else {
-		gw, cleanup, err = localGateway(*rpc, *tokenAddr, *payToFlag, *price)
+		gw, client, cleanup, err = localGateway(*rpc, *tokenAddr, *payToFlag, *price)
 	}
 	if err != nil {
 		return err
 	}
 	if cleanup != nil {
 		defer cleanup()
+	}
+
+	// Optional identity policy: reject payments from unregistered agents. The
+	// lookup is read-only, so the remote-mode gateway stays keyless; it only
+	// gains a read-only RPC connection for the registry.
+	if *identityRegistry != "" {
+		stop, err := attachIdentity(gw, client, *identityRegistry, *rpc)
+		if err != nil {
+			return err
+		}
+		if stop != nil {
+			defer stop()
+		}
 	}
 
 	// Optional durability: journal every settlement before answering, and (if
@@ -109,24 +127,25 @@ func run() error {
 }
 
 // localGateway dials the node, reads the chain ID, and settles on-chain itself.
-func localGateway(rpc, tokenAddr, payToFlag string, price int64) (*x402.Gateway, func(), error) {
+// It returns the client so the caller can reuse it for read-only lookups.
+func localGateway(rpc, tokenAddr, payToFlag string, price int64) (*x402.Gateway, *ethclient.Client, func(), error) {
 	ctx := context.Background()
 	client, chainID, err := nodeutil.Dial(ctx, rpc)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	transactor, gatewayAddr, err := nodeutil.TransactorFromEnv(gatewayKeyEnv, chainID)
 	if err != nil {
 		client.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	payTo := gatewayAddr
 	if payToFlag != "" {
 		if !common.IsHexAddress(payToFlag) {
 			client.Close()
-			return nil, nil, fmt.Errorf("--pay-to %q is not a valid address", payToFlag)
+			return nil, nil, nil, fmt.Errorf("--pay-to %q is not a valid address", payToFlag)
 		}
 		payTo = common.HexToAddress(payToFlag)
 	}
@@ -140,7 +159,34 @@ func localGateway(rpc, tokenAddr, payToFlag string, price int64) (*x402.Gateway,
 		Network:    fmt.Sprintf("eip155:%s", chainID),
 		Commit:     nil, // real node: WaitMined polls for the receipt
 	}
-	return gw, func() { client.Close() }, nil
+	return gw, client, func() { client.Close() }, nil
+}
+
+// attachIdentity stacks an identity policy after the default verify policy, so
+// unregistered agents are rejected. In local mode it reuses the settlement
+// client; in remote mode (client nil) it dials the RPC read-only for lookups
+// and returns a stop function to close that connection. The gateway still holds
+// no key in remote mode.
+func attachIdentity(gw *x402.Gateway, client *ethclient.Client, registryAddr, rpc string) (func(), error) {
+	if !common.IsHexAddress(registryAddr) {
+		return nil, fmt.Errorf("--identity-registry must be a valid address")
+	}
+	var (
+		backend bind.ContractBackend = client
+		stop    func()
+	)
+	if client == nil {
+		roClient, _, err := nodeutil.Dial(context.Background(), rpc)
+		if err != nil {
+			return nil, fmt.Errorf("identity lookups need a reachable --rpc: %w", err)
+		}
+		backend = roClient
+		stop = func() { roClient.Close() }
+	}
+	reg := registry.Bind(common.HexToAddress(registryAddr), backend)
+	gw.Policy = x402.Chain{x402.AlwaysVerify{}, x402.IdentityPolicy{Registry: reg}}
+	log.Printf("identity policy on: registry %s", registryAddr)
+	return stop, nil
 }
 
 // remoteGateway delegates to a facilitator and touches neither RPC nor a key.

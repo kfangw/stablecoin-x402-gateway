@@ -16,6 +16,7 @@ import (
 
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/ledger"
+	"github.com/kfangw/stablecoin-x402-gateway/registry"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 )
 
@@ -33,6 +34,8 @@ func main() {
 	switch sub {
 	case "deploy":
 		err = runDeploy(args)
+	case "deploy-registry":
+		err = runDeployRegistry(args)
 	case "mint":
 		err = runMint(args)
 	case "reconcile":
@@ -55,9 +58,10 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: issuer <command> [flags]
 
 commands:
-  deploy      deploy the tKRW token (deployer becomes the issuer)
-  mint        mint tKRW to an account
-  reconcile   reconcile the off-chain ledger against the node
+  deploy           deploy the tKRW token (deployer becomes the issuer)
+  deploy-registry  deploy the identity registry
+  mint             mint tKRW to an account
+  reconcile        reconcile the off-chain ledger against the node
 
 the issuer key is read from the `+issuerKeyEnv+` environment variable.
 `)
@@ -92,6 +96,38 @@ func runDeploy(args []string) error {
 	fmt.Printf("deployed tKRW on chain %s, issuer %s\n", chainID, issuerAddr.Hex())
 	// Final line: the address only, for `TOKEN=$(... | tail -1)`.
 	fmt.Println(tok.Address.Hex())
+	return nil
+}
+
+// runDeployRegistry deploys the identity registry and prints its address on the
+// final stdout line, matching runDeploy so callers capture it the same way.
+func runDeployRegistry(args []string) error {
+	fs := flag.NewFlagSet("deploy-registry", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	fs.Parse(args)
+
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	opts, _, err := nodeutil.TransactorFromEnv(issuerKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+
+	reg, tx, err := registry.Deploy(opts, client)
+	if err != nil {
+		return err
+	}
+	if _, err := bind.WaitDeployed(ctx, client, tx); err != nil {
+		return fmt.Errorf("wait for registry deployment: %w", err)
+	}
+	fmt.Printf("deployed identity registry on chain %s\n", chainID)
+	// Final line: the address only, for `REGISTRY=$(... | tail -1)`.
+	fmt.Println(reg.Address.Hex())
 	return nil
 }
 
