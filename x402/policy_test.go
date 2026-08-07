@@ -64,8 +64,8 @@ func TestPolicyDefaultEquivalence(t *testing.T) {
 // rejectAll approves nothing, even a payment that passed verification.
 type rejectAll struct{}
 
-func (rejectAll) Decide(context.Context, x402.PaymentContext) x402.Action {
-	return x402.ActionReject
+func (rejectAll) Decide(context.Context, x402.PaymentContext) x402.Decision {
+	return x402.Decision{Action: x402.ActionReject}
 }
 
 // A policy that rejects must stop the flow before settlement: the request gets
@@ -97,9 +97,9 @@ type capturePolicy struct {
 	got x402.PaymentContext
 }
 
-func (c *capturePolicy) Decide(_ context.Context, pc x402.PaymentContext) x402.Action {
+func (c *capturePolicy) Decide(_ context.Context, pc x402.PaymentContext) x402.Decision {
 	c.got = pc
-	return x402.ActionApprove
+	return x402.Decision{Action: x402.ActionApprove}
 }
 
 // The policy must receive a context whose verification and requirements match

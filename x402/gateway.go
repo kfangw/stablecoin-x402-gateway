@@ -179,10 +179,13 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	// reason below matches the original behavior; a custom policy may reject a
 	// verified payment, in which case the fallback reason is used.
 	pc := PaymentContext{Payload: p, Requirements: reqs, Verification: vr}
-	if g.policy().Decide(ctx, pc) != ActionApprove {
-		reason := "payment verification failed"
-		if vr != nil && vr.InvalidReason != "" {
-			reason = vr.InvalidReason
+	if d := g.policy().Decide(ctx, pc); d.Action != ActionApprove {
+		reason := d.Reason
+		if reason == "" {
+			reason = "payment verification failed"
+			if vr != nil && vr.InvalidReason != "" {
+				reason = vr.InvalidReason
+			}
 		}
 		return SettlementRecord{}, reason
 	}
