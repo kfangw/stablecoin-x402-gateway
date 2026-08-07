@@ -33,6 +33,14 @@ echo "init: identity registry deployed at ${REGISTRY}"
 echo "init: minting 100000 tKRW to agent ${AGENT_ADDRESS}"
 issuer mint --rpc "${RPC}" --token "${TOKEN}" --to "${AGENT_ADDRESS}" --amount 100000
 
+# The rogue agent gets tKRW too, so its payment is refused on identity, not on a
+# balance check: it reaches the identity policy with funds to spend and is turned
+# away only because it never registered.
+if [ -n "${ROGUE_ADDRESS:-}" ]; then
+	echo "init: minting 100000 tKRW to rogue agent ${ROGUE_ADDRESS}"
+	issuer mint --rpc "${RPC}" --token "${TOKEN}" --to "${ROGUE_ADDRESS}" --amount 100000
+fi
+
 printf '%s' "${REGISTRY}" > "${REGISTRY_FILE}"
 echo "init: wrote registry address to ${REGISTRY_FILE}"
 # Write the token address last: the gateway and agent wait on this file, so it

@@ -79,18 +79,22 @@ E2E_RPC_URL=http://localhost:8545 go test ./... -run E2E
 ## Docker Compose
 
 The four-terminal scenario above is packaged as a Compose stack. `up` starts an
-anvil node, runs a one-shot init service that deploys the token and mints to the
-agent, then starts a redpanda broker, the facilitator, and the gateway. The
-gateway runs in remote mode and holds no key: the facilitator settles on-chain
-and pays the gas. The gateway journals each settlement to the shared volume and
-publishes it to redpanda. The agent is a separate `run` step.
+anvil node, runs a one-shot init service that deploys the token and the identity
+registry and mints to the agents, then starts a redpanda broker, the
+facilitator, and the gateway. The gateway runs in remote mode and holds no key:
+the facilitator settles on-chain and pays the gas, and the gateway reaches the
+node only for read-only identity lookups. The gateway journals each settlement
+to the shared volume and publishes it to redpanda. The agents are separate `run`
+steps: `agent` registers itself and then pays, while `rogue-agent` skips
+registration and is refused.
 
 ```bash
-docker compose up -d              # anvil + token deploy/mint + redpanda + facilitator + gateway
-curl -s localhost:8402/premium/report   # 402 with the payment terms
-docker compose run --rm agent     # pays: HTTP 200, 500 tKRW, settlement tx
+docker compose up -d                # anvil + token/registry deploy + mint + redpanda + facilitator + gateway
+curl -s localhost:8402/premium/report     # 402 with the payment terms
+docker compose run --rm agent       # registers, then pays: HTTP 200, 500 tKRW, settlement tx
+docker compose run --rm rogue-agent # never registers: refused with errorCode identity_unregistered
 docker compose exec redpanda rpk topic consume settlements -n 1   # the published settlement event
-docker compose down -v            # tear down (removes the shared volume)
+docker compose down -v              # tear down (removes the shared volume)
 ```
 
 The init service publishes the deployed token address to a shared volume, which

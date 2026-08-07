@@ -15,8 +15,9 @@ RUN CGO_ENABLED=0 go build -o /out/ ./cmd/issuer ./cmd/gateway ./cmd/agent ./cmd
 FROM alpine:3
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/issuer /out/gateway /out/agent /out/facilitator /usr/local/bin/
-COPY docker/entrypoint-init.sh docker/entrypoint-gateway.sh docker/entrypoint-agent.sh docker/entrypoint-facilitator.sh /usr/local/bin/
+COPY docker/entrypoint-init.sh docker/entrypoint-gateway.sh docker/entrypoint-agent.sh docker/entrypoint-rogue.sh docker/entrypoint-facilitator.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/entrypoint-init.sh \
              /usr/local/bin/entrypoint-gateway.sh \
              /usr/local/bin/entrypoint-agent.sh \
+             /usr/local/bin/entrypoint-rogue.sh \
              /usr/local/bin/entrypoint-facilitator.sh
