@@ -11,4 +11,4 @@ if [ ! -s "${ADDR_FILE}" ]; then
 fi
 
 TOKEN="$(cat "${ADDR_FILE}")"
-exec agent --rpc "${RPC}" --token "${TOKEN}" --max 1000 http://gateway:8402/premium/report
+exec agent get --rpc "${RPC}" --token "${TOKEN}" --max 1000 http://gateway:8402/premium/report
