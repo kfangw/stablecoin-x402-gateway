@@ -28,7 +28,7 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 
 ## Agent identity — M1
 
-- [ ] Composable policy chain: several accept policies evaluated in order, so identity, mandate, and verification checks stack without touching the gateway core
+- [ ] Composable policy chain with a five-outcome decision type (approve, reject, defer and re-evaluate, ask the delegator, require a bond), so identity, mandate, and verification checks stack without touching the gateway core and richer policies can land later without breaking the interface
 - [ ] Minimal ERC-8004-style identity registry contract for local runs, behind the same interface as the deployed public registries
 - [ ] Identity policy: the gateway resolves the payer address in the registry and rejects unregistered agents
 - [ ] `register` command in the agent CLI: register the agent address and agent-card URL
@@ -38,12 +38,18 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 
 - [x] Pluggable accept-policy hook in the gateway, with the default policy reproducing the fixed always-verify rule
 - [ ] AP2-style mandates: user-signed delegations (limit, expiry, allowed payees and resources) carried with the payment and verified by the gateway, making the agent's spending authority checkable by the counterparty
+- [ ] Cumulative and rate limits in mandates: per-window spending totals and call frequency as stateful terms, enforced with gateway-side accounting alongside the per-payment checks
 - [ ] Mandate revocation: the delegator withdraws a mandate before its expiry, and the gateway rejects payments made under a revoked mandate
 - [ ] Ask action: for a payment beyond the mandate, the gateway answers "confirm with your delegator" instead of rejecting; the agent obtains confirmation and retries
 - [ ] Delegator command: signs, renews, and revokes mandates and answers confirmation requests, giving the delegation side of the flow a concrete actor
+- [ ] Confirmation history: per-delegator question counts and responses kept as policy state, so policies can see how often a delegator has been asked and how the answers went
+- [ ] Settlement stage tracking: submission, configurable confirmation depths, and finality exposed as stages, with accept policies re-evaluated as a payment's stage advances
 - [ ] Agent-side grant policy hook: a pluggable rule for when to pay autonomously and when to ask, with a simulation harness for comparing policies
-- [ ] Table-driven accept and grant policies loaded from a file, giving the harness a nontrivial policy pair to compare against the built-in rules
+- [ ] Decision-table policies: accept and grant rules loaded from a file, keyed on amount, settlement stage, risk score, and confirmation count, compared against the built-in rules in the harness
 - [ ] Traffic and adversary generators for the simulation harness, with metrics comparing policies on acceptance, losses, and escalations
+- [ ] Attack catalog for the harness: inflated payment terms, payee spoofing, and induced repeat-purchase loops, each paired with a benign task so a policy's loss reduction and its cost to normal work are measured together
+- [ ] Scripted delegator responder for the harness, with configurable error, non-response, and fatigue behavior
+- [ ] On-chain mandate enforcement: a delegated spending contract enforcing allowance, expiry, and payee allowlist for an agent, so the same mandate terms can be enforced by the gateway or by the chain and the two compared
 - [ ] Payment sessions: one authorization covering many requests, settled periodically
 - [ ] Resource discovery endpoint listing paid resources
 
@@ -60,9 +66,11 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 
 - [ ] Signed settlement receipts: the gateway signs a receipt linking the mandate, the settlement transaction, and invoice fields, so the delegation-to-delivery chain verifies offline
 - [ ] Audit command: verifies a receipt offline end to end, from the mandate signature and its revocation status to the settlement transaction and the asset delivery, and can consume published settlement events as its input
+- [ ] Decision log: a per-payment record of amount, prior risk score, policy outcomes, confirmation responses, and settlement result, extending the settlement journal so accept policies can be replayed and recalibrated offline
 - [ ] Reserve policy: minting bounded by an off-chain reserve ledger, with the reserve invariant added to reconciliation
 - [ ] Redemption flow: signature-based redemption requests settled by issuer burn
 - [ ] `receiveWithAuthorization` to close the front-running window of `transferWithAuthorization`
+- [ ] Resource binding in authorizations: tie each signed authorization to the resource it pays for, closing signature reuse across resources with the same price
 - [ ] Public testnet deployment using the deployed ERC-8004 registries, with a scripted one-command demo of the full scenario
 - [ ] Architecture diagram in the README
 - [ ] Trust assumptions in the README: what each party could forge, steal, or censor, and which check stops it
@@ -78,10 +86,14 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [ ] Gateway throughput and latency benchmarks
 - [ ] Fuzz tests for payment header parsing
 - [ ] Static analysis of the contract in CI
+- [ ] x402 conformance checker: a command that probes a 402 endpoint with replays, concurrent requests, cross-resource signatures, and injected settlement failures, and reports violations of one-payment-one-resource and related invariants; runs against this gateway in CI
+- [ ] Chain risk profiling: per-depth confirmation failure and rollback rates measured from observed chain history, with recorded traces replayable in the simulation harness
 
 ## Beyond M4 (exploratory)
 
 - [ ] Validator economics: stake-backed validation with contract-level slashing tied to a validation registry
 - [ ] Evaluation harness: mock settlement and on-chain settlement swappable behind the existing backend seam, with metrics for manipulation resistance and settlement integrity
 - [ ] On-chain verifier as an accept policy: execution evidence checked on chain against a user-signed specification
+- [ ] Payer bonds: a per-payment bond posted by the agent and forfeited on detected misuse, available to accept policies as a required action, with a minimal check that bond capital is separate from mandate funds
+- [ ] Batched micro-escrow: escrow with a challenge period amortized across batches of small payments, as a fair-exchange counterpart to the settle-first flow
 - [ ] Permissioned-chain profile (Besu QBFT or OP Stack devnet) for the full STO-style testbed
