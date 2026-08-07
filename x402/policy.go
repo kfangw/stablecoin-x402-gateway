@@ -43,6 +43,22 @@ type Policy interface {
 	Decide(ctx context.Context, pc PaymentContext) Decision
 }
 
+// Chain evaluates its policies in order and returns the first decision that is
+// not an approval, so any policy can veto a payment. An empty chain approves.
+// In practice a chain starts with AlwaysVerify and stacks further checks after
+// it, for example identity and mandate policies, without any of them having to
+// know about the others.
+type Chain []Policy
+
+func (c Chain) Decide(ctx context.Context, pc PaymentContext) Decision {
+	for _, p := range c {
+		if d := p.Decide(ctx, pc); d.Action != ActionApprove {
+			return d
+		}
+	}
+	return Decision{Action: ActionApprove}
+}
+
 // AlwaysVerify is the default policy. It reproduces the gateway's original
 // fixed rule: approve exactly when verification passed, and otherwise reject
 // carrying the facilitator's reason.
