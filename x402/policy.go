@@ -56,5 +56,5 @@ func (AlwaysVerify) Decide(_ context.Context, pc PaymentContext) Decision {
 	if pc.Verification != nil {
 		reason = pc.Verification.InvalidReason
 	}
-	return Decision{Action: ActionReject, Reason: reason}
+	return Decision{Action: ActionReject, Code: ErrCodeVerificationFailed, Reason: reason}
 }

@@ -124,13 +124,13 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 
 		header := r.Header.Get(HeaderPayment)
 		if header == "" {
-			g.writeRequirements(w, resource, "X-PAYMENT header is required")
+			g.writeRequirements(w, resource, ErrCodePaymentRequired, "X-PAYMENT header is required")
 			return
 		}
 
-		record, errMsg := g.verifyAndSettle(r.Context(), header, g.Requirements(resource))
-		if errMsg != "" {
-			g.writeRequirements(w, resource, errMsg)
+		record, fail := g.verifyAndSettle(r.Context(), header, g.Requirements(resource))
+		if fail != nil {
+			g.writeRequirements(w, resource, fail.Code, fail.Reason)
 			return
 		}
 
@@ -147,39 +147,52 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-func (g *Gateway) writeRequirements(w http.ResponseWriter, resource, msg string) {
+func (g *Gateway) writeRequirements(w http.ResponseWriter, resource, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusPaymentRequired)
 	body, _ := json.Marshal(RequirementsResponse{
 		X402Version: Version,
 		Error:       msg,
+		ErrorCode:   code,
 		Accepts:     []PaymentRequirements{g.Requirements(resource)},
 	})
 	_, _ = w.Write(body)
 }
 
+// failure is a non-approval outcome: the machine-readable code served as
+// errorCode and the human-readable reason served as error.
+type failure struct {
+	Code   string
+	Reason string
+}
+
 // verifyAndSettle runs the payment through the facilitator (verify, then
-// settle) and records the outcome. On failure it returns a human-readable
-// reason (empty on success), which the caller serves as the 402 error.
-func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs PaymentRequirements) (SettlementRecord, string) {
+// settle) and records the outcome. It returns a nil failure on success, or a
+// failure carrying the 402 error code and reason.
+func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs PaymentRequirements) (SettlementRecord, *failure) {
 	var p PaymentPayload
 	if err := DecodeHeader(header, &p); err != nil {
-		return SettlementRecord{}, fmt.Sprintf("invalid X-PAYMENT header: %v", err)
+		return SettlementRecord{}, &failure{ErrCodeInvalidHeader, fmt.Sprintf("invalid X-PAYMENT header: %v", err)}
 	}
 
 	fac := g.facilitator()
 
 	vr, err := fac.Verify(ctx, p, reqs)
 	if err != nil {
-		return SettlementRecord{}, fmt.Sprintf("verification error: %v", err)
+		return SettlementRecord{}, &failure{ErrCodeVerificationError, fmt.Sprintf("verification error: %v", err)}
 	}
 
 	// The accept decision is a swappable policy, evaluated before settlement.
-	// The default AlwaysVerify rejects exactly when verification failed, so the
-	// reason below matches the original behavior; a custom policy may reject a
-	// verified payment, in which case the fallback reason is used.
+	// A non-approval carries the policy's own code and reason, falling back to
+	// the outcome's default code and the facilitator's reason when either is
+	// empty. The default AlwaysVerify sets verification_failed, matching the
+	// original behavior.
 	pc := PaymentContext{Payload: p, Requirements: reqs, Verification: vr}
 	if d := g.policy().Decide(ctx, pc); d.Action != ActionApprove {
+		code := d.Code
+		if code == "" {
+			code = codeForAction(d.Action)
+		}
 		reason := d.Reason
 		if reason == "" {
 			reason = "payment verification failed"
@@ -187,25 +200,25 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 				reason = vr.InvalidReason
 			}
 		}
-		return SettlementRecord{}, reason
+		return SettlementRecord{}, &failure{code, reason}
 	}
 
 	sr, err := fac.Settle(ctx, p, reqs)
 	if err != nil {
-		return SettlementRecord{}, fmt.Sprintf("settlement error: %v", err)
+		return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("settlement error: %v", err)}
 	}
 	if sr == nil || !sr.Success {
 		reason := "settlement failed"
 		if sr != nil && sr.ErrorReason != "" {
 			reason = sr.ErrorReason
 		}
-		return SettlementRecord{}, reason
+		return SettlementRecord{}, &failure{ErrCodeSettlementFailed, reason}
 	}
 
 	// Reconstruct the record from the (already validated) payload and receipt.
 	auth, _, err := parseExactPayload(p.Payload)
 	if err != nil {
-		return SettlementRecord{}, fmt.Sprintf("record settlement: %v", err)
+		return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("record settlement: %v", err)}
 	}
 	record := SettlementRecord{
 		Payer:  auth.From,
@@ -218,13 +231,13 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	// source of truth; the in-memory slice mirrors it for callers that read it.
 	if g.Journal != nil {
 		if err := g.Journal.Append(g.journalEntry(record)); err != nil {
-			return SettlementRecord{}, fmt.Sprintf("journal settlement: %v", err)
+			return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("journal settlement: %v", err)}
 		}
 	}
 	g.mu.Lock()
 	g.Settlements = append(g.Settlements, record)
 	g.mu.Unlock()
-	return record, ""
+	return record, nil
 }
 
 // journalEntry projects a settlement record into its durable journal form.

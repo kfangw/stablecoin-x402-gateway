@@ -2,6 +2,7 @@ package x402_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
@@ -134,5 +135,91 @@ func TestPolicyReceivesPaymentContext(t *testing.T) {
 	}
 	if cap.got.Payload.Scheme != x402.SchemeExact {
 		t.Errorf("payload scheme = %s, want %s", cap.got.Payload.Scheme, x402.SchemeExact)
+	}
+}
+
+// fixedAction is a policy that always returns the same action with no code, so
+// the gateway maps the outcome to its default error code.
+type fixedAction struct{ a x402.Action }
+
+func (f fixedAction) Decide(context.Context, x402.PaymentContext) x402.Decision {
+	return x402.Decision{Action: f.a}
+}
+
+// Each non-approval outcome must reach the client as its own 402 error code,
+// and only approve must settle.
+func TestOutcomeMapsToErrorCode(t *testing.T) {
+	cases := []struct {
+		name     string
+		action   x402.Action
+		settles  bool
+		wantCode string
+	}{
+		{"approve", x402.ActionApprove, true, ""},
+		{"reject", x402.ActionReject, false, x402.ErrCodePolicyRejected},
+		{"defer", x402.ActionDefer, false, x402.ErrCodePaymentDeferred},
+		{"ask", x402.ActionAsk, false, x402.ErrCodeConfirmationRequired},
+		{"bond", x402.ActionRequireBond, false, x402.ErrCodeBondRequired},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, 500, 10_000)
+			f.gateway.Policy = fixedAction{tc.action}
+
+			result, err := f.agent.Get(f.server.URL + "/r")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.settles {
+				if result.StatusCode != http.StatusOK {
+					t.Fatalf("status = %d, want 200", result.StatusCode)
+				}
+				if len(f.gateway.Settlements) != 1 {
+					t.Errorf("settlements = %d, want 1", len(f.gateway.Settlements))
+				}
+				return
+			}
+			if result.StatusCode != http.StatusPaymentRequired {
+				t.Fatalf("status = %d, want 402", result.StatusCode)
+			}
+			if result.ErrorCode != tc.wantCode {
+				t.Errorf("errorCode = %q, want %q", result.ErrorCode, tc.wantCode)
+			}
+			if len(f.gateway.Settlements) != 0 {
+				t.Errorf("settlements = %d, want 0 (no settlement on refusal)", len(f.gateway.Settlements))
+			}
+		})
+	}
+}
+
+// A missing X-PAYMENT header must be refused with the payment_required code, and
+// the default policy's rejection must surface verification_failed.
+func TestErrorCodesOnGateway(t *testing.T) {
+	f := newFixture(t, 500, 10_000)
+
+	resp, err := http.Get(f.server.URL + "/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refused x402.RequirementsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&refused); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if refused.ErrorCode != x402.ErrCodePaymentRequired {
+		t.Errorf("no-header errorCode = %q, want %q", refused.ErrorCode, x402.ErrCodePaymentRequired)
+	}
+
+	// A wallet with no funds fails verification; the default policy rejects it.
+	poor := newFixture(t, 500, 0)
+	result, err := poor.agent.Get(poor.server.URL + "/r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402", result.StatusCode)
+	}
+	if result.ErrorCode != x402.ErrCodeVerificationFailed {
+		t.Errorf("errorCode = %q, want %q", result.ErrorCode, x402.ErrCodeVerificationFailed)
 	}
 }

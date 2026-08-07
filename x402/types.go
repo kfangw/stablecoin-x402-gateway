@@ -34,10 +34,13 @@ type PaymentRequirements struct {
 	Extra             map[string]string `json:"extra,omitempty"`
 }
 
-// RequirementsResponse is the 402 response body.
+// RequirementsResponse is the 402 response body. ErrorCode is an additive field
+// carrying a machine-readable reason (see errcodes.go); the other fields keep
+// the public x402 wire shape, so the addition stays compatible.
 type RequirementsResponse struct {
 	X402Version int                   `json:"x402Version"`
 	Error       string                `json:"error"`
+	ErrorCode   string                `json:"errorCode,omitempty"`
 	Accepts     []PaymentRequirements `json:"accepts"`
 }
 

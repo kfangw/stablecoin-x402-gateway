@@ -47,6 +47,18 @@ type Result struct {
 	AmountPaid  *big.Int
 	Settlement  *SettlementResponse
 	Requirement *PaymentRequirements
+	// ErrorCode is the machine-readable code from a 402 that refused the paid
+	// request, empty otherwise. RegistrationHint reports whether that refusal
+	// was an unregistered-agent rejection, which a caller can act on by
+	// registering the agent and retrying.
+	ErrorCode string
+}
+
+// RegistrationHint reports whether the paid request was refused because the
+// payer is not a registered agent. When true, registering the agent and
+// retrying is the way forward.
+func (r *Result) RegistrationHint() bool {
+	return r.ErrorCode == ErrCodeIdentityUnregistered
 }
 
 func (a *Agent) httpClient() *http.Client {
@@ -125,6 +137,14 @@ func (a *Agent) Get(url string) (*Result, error) {
 		var s SettlementResponse
 		if err := DecodeHeader(h, &s); err == nil {
 			result.Settlement = &s
+		}
+	}
+	// A 402 on the paid request carries a machine-readable code explaining the
+	// refusal (for example an unregistered agent); surface it on the result.
+	if resp2.StatusCode == http.StatusPaymentRequired {
+		var refused RequirementsResponse
+		if err := json.Unmarshal(body2, &refused); err == nil {
+			result.ErrorCode = refused.ErrorCode
 		}
 	}
 	return result, nil
