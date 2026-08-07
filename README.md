@@ -161,7 +161,8 @@ This repository verifies protocol flows; it is not a production implementation. 
 
 - The contract is unaudited and the token uses zero decimals. Regulatory requirements such as reserve attestation, allowlists, and freezing are out of scope.
 - The gateway can run the facilitator in-process or delegate to a remote one, but the facilitator itself is a single instance with no authentication, rate limiting, or horizontal scaling.
-- The ledger is in-memory and rescans from genesis. At production scale this calls for incremental indexing, durable storage, and reorg handling.
+- Agent identity uses a minimal local registry that records a registration flag and an agent-card URL. The card is stored but not fetched or validated, and the wider ERC-8004 identity and reputation surface is out of scope. A deployed registry would replace the local one behind the same read-only reader interface.
+- The ledger keeps incremental indexing and reorg handling, but its state is in-memory and the reconciliation path still rescans from genesis; durable ledger storage is out of scope. Settlements can be journaled durably with `--journal`, but the ledger itself is not.
 - Keys are supplied via environment variables and live in process memory; production deployments assume KMS or HSM custody.
 
 ## Roadmap
