@@ -167,7 +167,153 @@ This repository verifies protocol flows; it is not a production implementation. 
 
 ## Roadmap
 
-[ROADMAP.md](ROADMAP.md) tracks what is built and what is planned, grouped by area.
+[ROADMAP.md](ROADMAP.md) tracks what is built and what is planned, grouped by area. The unchecked items build toward the scenario stated at its head: a registered agent buys a mock RWA token over x402, within a delegated mandate, and a third party can audit the whole chain from delegation through payment and settlement to delivery. Complete, the system covers four areas.
+
+**A payment rail for machine-to-machine commerce.** Issuance and redemption bounded by a reserve ledger, gasless payment with the front-running window of `transferWithAuthorization` closed by `receiveWithAuthorization`, authorizations bound to the resource they pay for, and payment sessions that settle many requests periodically under one authorization.
+
+**Delegation the counterparty can check.** User-signed mandates carry limits, expiry, allowed payees and resources, and cumulative and rate terms with the payment, and the gateway verifies them. A payment beyond the mandate is answered with "confirm with your delegator" rather than a refusal, and the agent retries after confirmation; mandates can be revoked before expiry. The same mandate terms can be enforced by the gateway or by an on-chain contract, so the two enforcement points can be compared.
+
+**A workbench for accept policies.** Decision-table policies loaded from files, keyed on amount, settlement stage, risk score, and confirmation count, run against the built-in rules in a simulation harness with traffic and adversary generators, a scripted delegator responder, and metrics for acceptance, losses, and escalations. A per-payment decision log makes accept decisions replayable offline, and recorded chain traces feed settlement risk back into the harness.
+
+**Delivery a third party can audit.** Mock RWA tokens delivered through a refundable two-transaction flow or atomic delivery-versus-payment, eligibility checks with delegator-to-agent inheritance, and signed receipts linking the mandate, the settlement transaction, and the invoice, verified offline end to end by an audit command. A conformance checker probes any 402 endpoint for violations of one-payment-one-resource and related invariants, and runs against this gateway in CI first.
+
+Each milestone lands with a runnable demonstration: `cmd/demo` and the Compose stack grow with the features, and the final milestone ships a scripted public-testnet run that ends with an offline audit of the receipts it produced.
+
+### The destination, dynamic view: the full scenario
+
+One purchase of a mock RWA token, from mandate to third-party audit. The confirmation branch shows the Ask flow: a payment beyond the mandate is not refused but sent back for the delegator's confirmation.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Delegator
+    participant A as Agent
+    participant G as Gateway
+    participant F as Facilitator
+    participant C as Chain (tKRW, RWA, DvP, registries)
+    actor X as Auditor
+
+    D->>A: signs a mandate<br/>(limit, expiry, payees, cumulative and rate terms)
+    A->>G: GET /rwa/token-sale
+    G-->>A: 402 with payment terms
+    Note over A: grant policy decides to pay autonomously,<br/>then signs an EIP-3009 authorization
+    A->>G: X-PAYMENT + mandate
+    G->>F: POST /verify
+    F->>C: eth_call: balance, authorization state
+    F-->>G: isValid, payer
+    Note over G: accept-policy chain: identity, mandate<br/>(limits, expiry, revocation), settlement stage
+
+    alt payment beyond the mandate
+        G-->>A: 402, errorCode: confirmation_required
+        A->>D: asks for confirmation
+        D-->>A: signed confirmation
+        Note over A,G: the agent retries with the confirmation attached
+    else payment within the mandate
+        G->>F: POST /settle
+        F->>C: receiveWithAuthorization + atomic DvP,<br/>eligibility checked on chain
+        C-->>F: settled and delivered in one transaction
+        F-->>G: success, transaction hash
+        Note over G: decision log and journal before responding,<br/>outbox publishes the settlement to Kafka
+        G-->>A: 200 + signed receipt<br/>linking mandate, settlement, and invoice
+    end
+
+    X->>C: audit: recheck the settlement and the delivery
+    Note over X: verifies the receipt offline end to end,<br/>from mandate signature to asset delivery
+```
+
+### The destination, static view: roles at completion
+
+Two roles join the implemented picture: the delegator, who signs and revokes mandates and answers confirmation requests, and the third party, who can verify the whole chain without trusting any participant. The chain grows from two contracts to six, and the records layer becomes the substrate of the audit.
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 55, "rankSpacing": 75}}}%%
+flowchart TB
+    subgraph delegator["Delegator &nbsp;·&nbsp; signs, renews, revokes mandates"]
+        DEL["delegator command<br/>mandates, confirmations"]
+    end
+
+    subgraph payer["Payer: the agent &nbsp;·&nbsp; signs, never submits on the payment path"]
+        direction LR
+        AG["x402 agent client<br/>sessions, retries"]
+        WAL["wallet<br/>EIP-712 signing only"]
+        AGP["grant policy<br/>pay autonomously or ask"]
+    end
+
+    subgraph server["Resource server: the gateway &nbsp;·&nbsp; holds no key"]
+        direction LR
+        GW["x402 gateway<br/>402 terms, sessions, discovery"]
+        POL["accept-policy chain<br/>identity, mandate, stage;<br/>five outcomes"]
+        RCT["receipt signer<br/>mandate, settlement, invoice"]
+    end
+
+    subgraph executor["Settlement executor: the facilitator &nbsp;·&nbsp; holds the key, pays gas"]
+        FAC["verify and settle<br/>local and remote"]
+    end
+
+    subgraph issuer["Issuer and operator"]
+        ISS["issuance within reserve,<br/>redemption, freeze, allowlist"]
+    end
+
+    subgraph records["Records: derived, auditable state"]
+        direction LR
+        LED["issuance ledger<br/>+ reserve invariant"]
+        ALED["asset-holdings ledger"]
+        JRN["journal + decision log<br/>outbox to Kafka"]
+    end
+
+    subgraph lab["Policy lab (offline)"]
+        SIM["simulation harness<br/>traffic and adversary generators,<br/>decision-table policies"]
+    end
+
+    subgraph chain["Chain: shared ground truth"]
+        direction LR
+        IDR["ERC-8004 registries<br/>(deployed, testnet)"]
+        MAN["mandate contract<br/>on-chain enforcement option"]
+        KRW["tKRW + receiveWithAuthorization,<br/>freeze, allowlist"]
+        DVL["delivery: atomic DvP,<br/>mock RWA token,<br/>eligibility registry"]
+    end
+
+    subgraph thirdparty["Third party"]
+        direction LR
+        AUD["audit command<br/>offline receipt verification"]
+        CONF["x402 conformance checker<br/>probes any 402 endpoint,<br/>runs against this gateway in CI"]
+    end
+
+    DEL -.->|"mandate / confirmation"| AG
+    AG --- WAL
+    AG --- AGP
+    AG ==>|"X-PAYMENT + mandate"| GW
+    GW --- POL
+    GW --- RCT
+    GW ==>|"verify, settle"| FAC
+    FAC ==>|"receiveWithAuthorization + atomic DvP"| KRW
+    POL -.->|"isRegistered"| IDR
+    POL -.->|"enforcement comparison"| MAN
+    GW -->|"journals, logs decisions"| JRN
+    ISS -->|"mint, burn, freeze"| KRW
+    ISS --- LED
+    LED -.->|"Transfer events"| KRW
+    ALED -.->|"delivery events"| DVL
+    JRN -.->|"decision log replay"| SIM
+    AUD -.->|"verifies signed receipts"| RCT
+    FAC ~~~ LED
+    FAC ~~~ ALED
+    FAC ~~~ JRN
+
+    classDef comp fill:#ffffff,stroke:#7A869A,color:#1F2937
+    class DEL,AG,WAL,AGP,GW,POL,RCT,FAC,ISS,LED,ALED,JRN,SIM,AUD,CONF,IDR,MAN,KRW,DVL comp
+    style delegator fill:#E0F2F1,stroke:#4DB6AC,color:#1F2937
+    style payer fill:#E8F1FB,stroke:#6E9BD1,color:#1F2937
+    style server fill:#E9F6EC,stroke:#6FBA82,color:#1F2937
+    style executor fill:#FDF2E3,stroke:#D9A959,color:#1F2937
+    style issuer fill:#F4EAF7,stroke:#AF84C4,color:#1F2937
+    style records fill:#EFF1F4,stroke:#93A0AD,color:#1F2937
+    style lab fill:#FCE4EC,stroke:#E491AC,color:#1F2937
+    style thirdparty fill:#FFEBEE,stroke:#E57373,color:#1F2937
+    style chain fill:#FBF6DC,stroke:#C2B15E,color:#1F2937
+```
+
+Compared with the implemented system, the payer gains a grant policy (its own side of the accept decision), the gateway's policy chain grows from identity to mandate and settlement stage with five outcomes, the chain gains mandate enforcement, delivery, and eligibility contracts, and every payment now leaves a signed receipt that a third party can verify offline. The policy lab sits outside the runtime: it replays decision logs and compares policies against generated traffic and adversaries.
 
 ## References
 
