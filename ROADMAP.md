@@ -28,11 +28,11 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 
 ## Agent identity — M1
 
-- [ ] Composable policy chain with a five-outcome decision type (approve, reject, defer and re-evaluate, ask the delegator, require a bond), so identity, mandate, and verification checks stack without touching the gateway core and richer policies can land later without breaking the interface
-- [ ] Minimal ERC-8004-style identity registry contract for local runs, behind the same interface as the deployed public registries
-- [ ] Identity policy: the gateway resolves the payer address in the registry and rejects unregistered agents
-- [ ] `register` command in the agent CLI: register the agent address and agent-card URL
-- [ ] Machine-readable error codes in 402 responses alongside human-readable messages, including the identity requirement
+- [x] Composable policy chain with a five-outcome decision type (approve, reject, defer and re-evaluate, ask the delegator, require a bond), so identity, mandate, and verification checks stack without touching the gateway core and richer policies can land later without breaking the interface
+- [x] Minimal ERC-8004-style identity registry contract for local runs, behind the same interface as the deployed public registries
+- [x] Identity policy: the gateway resolves the payer address in the registry and rejects unregistered agents
+- [x] `register` command in the agent CLI: register the agent address and agent-card URL
+- [x] Machine-readable error codes in 402 responses alongside human-readable messages, including the identity requirement
 
 ## Delegation and mandates — M2
 

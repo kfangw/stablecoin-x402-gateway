@@ -14,15 +14,17 @@ go run ./cmd/demo
 go test ./...
 ```
 
-`cmd/demo` runs the six steps below on an in-process simulated chain (go-ethereum simulated backend). No node or external service is required.
+`cmd/demo` runs the eight steps below on an in-process simulated chain (go-ethereum simulated backend). No node or external service is required.
 
 ```
-1. Issue      the issuer deploys the tKRW contract and mints 100,000 tKRW to the agent wallet
-2. Protect    the gateway guards a paid resource with x402 (price: 500 tKRW)
-3. Pay        the agent reads the 402 response and retries with a signed EIP-3009 authorization, holding zero ETH
-4. Settle     the gateway verifies the signature and settles on-chain, paying for gas
-5. Reconcile  the off-chain ledger is checked against on-chain state in three ways
-6. Defend     replaying the same signature is rejected
+1. Issue      the issuer deploys the tKRW contract and the identity registry, and mints 100,000 tKRW to the agent wallet
+2. Protect    the gateway guards a paid resource with x402 and requires a registered agent (price: 500 tKRW)
+3. Refuse     an unregistered agent is turned away with errorCode identity_unregistered
+4. Register   the agent registers itself in the identity registry (a one-time setup transaction)
+5. Pay        the agent reads the 402 response and retries with a signed EIP-3009 authorization, sending no transaction on the payment path
+6. Settle     the gateway verifies the signature and settles on-chain, paying for gas
+7. Reconcile  the off-chain ledger is checked against on-chain state in three ways
+8. Defend     replaying the same signature is rejected
 ```
 
 ## Real node mode
@@ -47,11 +49,22 @@ go run ./cmd/gateway --rpc http://localhost:8545 --token $TOKEN \
 
 # terminal 4: agent pays for the resource
 export AGENT_KEY=<agent private key>
-go run ./cmd/agent --rpc http://localhost:8545 --token $TOKEN \
+go run ./cmd/agent get --rpc http://localhost:8545 --token $TOKEN \
   --max 1000 http://localhost:8402/premium/report
 
 # reconcile the off-chain ledger against the node
 go run ./cmd/issuer reconcile --rpc http://localhost:8545 --token $TOKEN
+```
+
+To require registered agents, deploy the identity registry, start the gateway
+with `--identity-registry`, and have the agent register once before paying:
+
+```bash
+REGISTRY=$(go run ./cmd/issuer deploy-registry --rpc http://localhost:8545 | tail -1)
+go run ./cmd/gateway --rpc http://localhost:8545 --token $TOKEN \
+  --listen :8402 --price 500 --identity-registry $REGISTRY
+go run ./cmd/agent register --rpc http://localhost:8545 \
+  --registry $REGISTRY --card https://cards.example/agent   # one-time setup
 ```
 
 Keys are passed through environment variables (ISSUER_KEY, GATEWAY_KEY,
@@ -88,17 +101,18 @@ keys are the publicly known anvil development accounts and hold no real funds.
 ## Layout
 
 ```
-contracts/         KRWTestStablecoin.sol: ERC-20 + issuer mint/burn + EIP-3009 + Pausable + two-step issuer handover
+contracts/         KRWTestStablecoin.sol + IdentityRegistry.sol (ERC-8004-style agent registry)
 token/             contract deployment and calls (ABI and bytecode embedded)
+registry/          identity registry deployment and calls (ABI and bytecode embedded)
 wallet/            key management and EIP-712 signing (TransferWithAuthorization)
 ledger/            issuance ledger indexed from Transfer events, reconciled against the chain
-x402/              the payment protocol: gateway (server), facilitator (verify/settle, local or remote), and agent (client)
+x402/              the payment protocol: gateway (server), facilitator (verify/settle, local or remote), agent (client), and accept policies
 internal/nodeutil/ RPC dial and env-key transactor helpers shared by the binaries
 cmd/demo/          one-command demo of the whole flow on the simulated backend
-cmd/issuer/        issuer CLI: deploy, mint, reconcile against a real node
+cmd/issuer/        issuer CLI: deploy, deploy-registry, mint, reconcile against a real node
 cmd/gateway/       standalone x402 gateway server (built-in or remote facilitator)
 cmd/facilitator/   facilitator HTTP service: verify, settle, supported
-cmd/agent/         paying agent CLI against a real node
+cmd/agent/         paying agent CLI: get (pay for a resource), register (join the identity registry)
 ```
 
 ## Design notes
@@ -131,7 +145,9 @@ go run ./cmd/gateway --facilitator-url http://localhost:8403 \
   --token $TOKEN --network eip155:31337 --pay-to <payee> --price 500               # no --rpc, no key
 ```
 
-**The accept decision is a policy.** Deployed payment systems differ in their accept rules: some approve optimistically before finality, some verify every payment, some release only after settlement. The gateway makes this rule an explicit, swappable component instead of hard-coded control flow; the default `AlwaysVerify` policy reproduces the original behavior, approving exactly when verification passed. The policy runs before settlement and only decides, so rejecting a payment stops it short of any on-chain transaction. This mirrors how x402 V2 exposes the release decision as a lifecycle hook.
+**The accept decision is a policy.** Deployed payment systems differ in their accept rules: some approve optimistically before finality, some verify every payment, some release only after settlement. The gateway makes this rule an explicit, swappable component instead of hard-coded control flow; the default `AlwaysVerify` policy reproduces the original behavior, approving exactly when verification passed. The policy runs before settlement and only decides, so rejecting a payment stops it short of any on-chain transaction. This mirrors how x402 V2 exposes the release decision as a lifecycle hook. A `Decision` carries one of five actions (approve, reject, defer, ask, require-bond) with a machine-readable error code, and a `Chain` evaluates policies in order and returns the first non-approval, so identity, mandate, and verification checks stack without any of them knowing about the others. Only approve settles; every other action becomes a 402 with its own `errorCode`.
+
+**Agent identity.** The gateway can require the paying agent to be registered before it settles. `IdentityRegistry.sol` is a minimal, ERC-8004-style registry that maps an agent address to a registration flag and an agent-card URL; agents self-register with `msg.sender`, matching the registration model of the deployed registries this stands in for. An `IdentityPolicy` stacks after `AlwaysVerify` in the chain, resolves the payer from the verification result, and rejects an unregistered agent with `errorCode: identity_unregistered`; a registry lookup that errors fails closed. The lookup is read-only, so a remote-mode gateway that holds no settlement key gains only a read-only RPC connection for it. The payer never submits a transaction on the payment path (that is the point of the EIP-3009 authorization); registration is a separate, one-time setup transaction the agent sends itself with `agent register`. Enable the check with `--identity-registry <address>`.
 
 **Durable settlement journal and outbox.** Without a journal the gateway keeps settlements only in memory, so a crash loses the record of what it settled. With `--journal` the gateway writes each settlement to an append-only, fsynced JSONL file before it answers the request, so the settlement is durable by the time the caller learns it succeeded; on restart the file replays to rebuild the in-memory view, and a torn final line from a crash mid-write is dropped. Publishing then follows the outbox pattern: a separate loop scans the journal and delivers unpublished settlements through a `Sink`, marking each published only after the sink acknowledges it. The default sink (`--kafka-brokers`) produces to a Kafka topic, keyed by the settlement transaction hash. Delivery is at-least-once by construction, since a crash between the produce and the marker redelivers the event, so consumers deduplicate on that hash. Journaling and publishing are both opt-in; without the flags every existing path runs unchanged.
 
