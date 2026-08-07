@@ -17,10 +17,12 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
+	"github.com/kfangw/stablecoin-x402-gateway/registry"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 	"github.com/kfangw/stablecoin-x402-gateway/wallet"
 	"github.com/kfangw/stablecoin-x402-gateway/x402"
@@ -40,6 +42,8 @@ func main() {
 	switch sub {
 	case "get":
 		err = runGet(args)
+	case "register":
+		err = runRegister(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -59,6 +63,7 @@ func usage() {
 
 commands:
   get         pay for and fetch an x402-protected resource
+  register    register the agent in the identity registry (one-time setup)
 
 the agent key is read from the `+agentKeyEnv+` environment variable.
 `)
@@ -127,6 +132,49 @@ func runGet(args []string) error {
 	if result.Settlement != nil {
 		fmt.Printf("settlement tx: %s\n", result.Settlement.Transaction)
 	}
+	return nil
+}
+
+// runRegister submits a one-time self-registration to the identity registry.
+// Unlike the payment path, registration is an ordinary transaction the agent
+// sends and pays gas for, using the AGENT_KEY account. Re-running it updates the
+// stored agent-card URL.
+func runRegister(args []string) error {
+	fs := flag.NewFlagSet("register", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	registryAddr := fs.String("registry", "", "identity registry address (required)")
+	card := fs.String("card", "", "agent-card URL to register (required)")
+	fs.Parse(args)
+
+	if *registryAddr == "" || !common.IsHexAddress(*registryAddr) {
+		return fmt.Errorf("--registry must be a valid address")
+	}
+	if *card == "" {
+		return fmt.Errorf("--card is required")
+	}
+
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	opts, agentAddr, err := nodeutil.TransactorFromEnv(agentKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+
+	reg := registry.Bind(common.HexToAddress(*registryAddr), client)
+	tx, err := reg.Register(opts, *card)
+	if err != nil {
+		return fmt.Errorf("submit register: %w", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, tx); err != nil {
+		return fmt.Errorf("await register: %w", err)
+	}
+	fmt.Printf("registered agent %s with card %s\n", agentAddr.Hex(), *card)
+	fmt.Printf("register tx: %s\n", tx.Hash().Hex())
 	return nil
 }
 
