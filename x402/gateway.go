@@ -254,6 +254,41 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	return record, nil
 }
 
+// RevokeMandate verifies a delegator's signed revocation and records it, so the
+// next payment under that mandate is rejected. It fails if the gateway is not
+// enforcing mandates or the signature does not verify.
+func (g *Gateway) RevokeMandate(rev RevocationJSON) error {
+	mp, ok := g.mandatePolicy()
+	if !ok {
+		return fmt.Errorf("x402: gateway is not enforcing mandates")
+	}
+	mandateID, err := parseBytes32(rev.MandateID)
+	if err != nil {
+		return fmt.Errorf("x402: revocation mandate id: %w", err)
+	}
+	delegator, err := VerifyRevocation(mandateID, common.FromHex(rev.Signature), mp.ChainID)
+	if err != nil {
+		return err
+	}
+	mp.revoke(delegator, mandateID)
+	return nil
+}
+
+// mandatePolicy returns the mandate policy in the active chain, if any.
+func (g *Gateway) mandatePolicy() (MandatePolicy, bool) {
+	switch p := g.policy().(type) {
+	case Chain:
+		for _, e := range p {
+			if mp, ok := e.(MandatePolicy); ok {
+				return mp, true
+			}
+		}
+	case MandatePolicy:
+		return p, true
+	}
+	return MandatePolicy{}, false
+}
+
 // settlers returns the policies in the active chain that observe settlement.
 func (g *Gateway) settlers() []PaymentSettler {
 	var out []PaymentSettler

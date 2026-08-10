@@ -25,12 +25,26 @@ type MandatePolicy struct {
 	// scope-only policy and set by NewMandatePolicy; the gateway uses the
 	// constructor so accounting is on whenever mandates are required.
 	accounts *mandateAccounts
+	// revocations holds mandates the delegator has withdrawn, keyed by
+	// (delegator, mandateId). Set by NewMandatePolicy.
+	revocations *mandateRevocations
 }
 
 // NewMandatePolicy returns a mandate policy with cumulative and rate accounting
-// enabled.
+// and a revocation set enabled.
 func NewMandatePolicy(chainID *big.Int) MandatePolicy {
-	return MandatePolicy{ChainID: chainID, accounts: newMandateAccounts()}
+	return MandatePolicy{
+		ChainID:     chainID,
+		accounts:    newMandateAccounts(),
+		revocations: newMandateRevocations(),
+	}
+}
+
+// revoke records that the delegator has withdrawn a mandate.
+func (p MandatePolicy) revoke(delegator common.Address, mandateID [32]byte) {
+	if p.revocations != nil {
+		p.revocations.add(delegator, mandateID)
+	}
 }
 
 func (p MandatePolicy) now() time.Time {
@@ -68,6 +82,10 @@ func (p MandatePolicy) Decide(_ context.Context, pc PaymentContext) Decision {
 	}
 	if m.ValidBefore != nil && now.Cmp(m.ValidBefore) >= 0 {
 		return rejectMandate(ErrCodeMandateExpired, "mandate has expired")
+	}
+
+	if p.revocations != nil && p.revocations.has(m.Delegator, m.MandateID) {
+		return rejectMandate(ErrCodeMandateRevoked, "mandate has been revoked")
 	}
 
 	// An empty allowlist places no constraint on that dimension; a non-empty one
@@ -178,6 +196,36 @@ func windowDur(seconds *big.Int) time.Duration {
 		return allTime
 	}
 	return time.Duration(seconds.Int64()) * time.Second
+}
+
+// mandateRevocations is the set of mandates a delegator has withdrawn, keyed by
+// (delegator, mandateId) so only the mandate's own delegator can revoke it.
+type mandateRevocations struct {
+	mu  sync.Mutex
+	set map[[52]byte]bool
+}
+
+func newMandateRevocations() *mandateRevocations {
+	return &mandateRevocations{set: make(map[[52]byte]bool)}
+}
+
+func revocationKey(delegator common.Address, mandateID [32]byte) [52]byte {
+	var k [52]byte
+	copy(k[:20], delegator.Bytes())
+	copy(k[20:], mandateID[:])
+	return k
+}
+
+func (r *mandateRevocations) add(delegator common.Address, mandateID [32]byte) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.set[revocationKey(delegator, mandateID)] = true
+}
+
+func (r *mandateRevocations) has(delegator common.Address, mandateID [32]byte) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.set[revocationKey(delegator, mandateID)]
 }
 
 // mandateAccounts tracks per-mandate cumulative spend and payment frequency in

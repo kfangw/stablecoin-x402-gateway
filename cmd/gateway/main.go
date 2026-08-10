@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -123,6 +124,9 @@ func run() error {
 	})
 	mux := http.NewServeMux()
 	mux.Handle("/premium/report", gw.Middleware(resource))
+	if *requireMandate {
+		mux.HandleFunc("/mandates/revoke", revokeHandler(gw))
+	}
 
 	server := &http.Server{Addr: *listen, Handler: mux}
 	mode := "local"
@@ -133,6 +137,28 @@ func run() error {
 		*listen, mode, gw.Token.Address.Hex(), gw.Price, gw.PayTo.Hex(), gw.Network)
 
 	return serve(server)
+}
+
+// revokeHandler accepts a delegator's signed mandate revocation. On a valid
+// signature it records the revocation and answers 204; a bad body or signature
+// is a 400.
+func revokeHandler(gw *x402.Gateway) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var rev x402.RevocationJSON
+		if err := json.NewDecoder(r.Body).Decode(&rev); err != nil {
+			http.Error(w, "invalid revocation body", http.StatusBadRequest)
+			return
+		}
+		if err := gw.RevokeMandate(rev); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 // localGateway dials the node, reads the chain ID, and settles on-chain itself.
