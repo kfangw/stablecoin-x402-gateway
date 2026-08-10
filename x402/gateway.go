@@ -191,6 +191,12 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	// empty. The default AlwaysVerify sets verification_failed, matching the
 	// original behavior.
 	pc := PaymentContext{Payload: p, Requirements: reqs, Verification: vr}
+	// Expose the delegator's confirmation history (a snapshot from before this
+	// payment) so a policy can weigh it.
+	if mp, ok := g.mandatePolicy(); ok && p.Mandate != nil {
+		h := mp.DelegatorHistory(common.HexToAddress(p.Mandate.Mandate.Delegator))
+		pc.History = &h
+	}
 	if d := g.policy().Decide(ctx, pc); d.Action != ActionApprove {
 		code := d.Code
 		if code == "" {

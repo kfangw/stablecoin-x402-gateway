@@ -35,6 +35,9 @@ type PaymentContext struct {
 	// Verification is the facilitator's verdict. Nil means verification was not
 	// run, which is reserved for future policies that decide before verifying.
 	Verification *VerifyResult
+	// History, when set, is a snapshot of the payment delegator's confirmation
+	// history, so a policy can weigh how often this delegator has been asked.
+	History *DelegatorHistory
 }
 
 // Policy decides whether the gateway should approve a payment. Implementations

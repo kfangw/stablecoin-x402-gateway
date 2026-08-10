@@ -33,16 +33,28 @@ type MandatePolicy struct {
 	// revocations holds mandates the delegator has withdrawn, keyed by
 	// (delegator, mandateId). Set by NewMandatePolicy.
 	revocations *mandateRevocations
+	// history records the confirmation flow per delegator. Set by
+	// NewMandatePolicy; read through PaymentContext.History.
+	history *ConfirmationHistory
 }
 
-// NewMandatePolicy returns a mandate policy with cumulative and rate accounting
-// and a revocation set enabled.
+// NewMandatePolicy returns a mandate policy with cumulative and rate accounting,
+// a revocation set, and confirmation history enabled.
 func NewMandatePolicy(chainID *big.Int) MandatePolicy {
 	return MandatePolicy{
 		ChainID:     chainID,
 		accounts:    newMandateAccounts(),
 		revocations: newMandateRevocations(),
+		history:     newConfirmationHistory(),
 	}
+}
+
+// DelegatorHistory returns a snapshot of a delegator's confirmation history.
+func (p MandatePolicy) DelegatorHistory(delegator common.Address) DelegatorHistory {
+	if p.history == nil {
+		return DelegatorHistory{}
+	}
+	return p.history.Snapshot(delegator)
 }
 
 // revoke records that the delegator has withdrawn a mandate.
@@ -112,9 +124,13 @@ func (p MandatePolicy) Decide(_ context.Context, pc PaymentContext) Decision {
 	// lets a limit-type violation through. It never rescues an entitlement
 	// violation; all of those were checked above.
 	confirmed := p.confirmationApproves(pc, m, amount)
+	attached := pc.Payload.Confirmation != nil
 
-	if m.MaxAmountPerPayment != nil && m.MaxAmountPerPayment.Sign() > 0 && amount.Cmp(m.MaxAmountPerPayment) > 0 && !confirmed {
-		return p.overLimit(ErrCodeMandateExceeded, "amount exceeds the per-payment limit")
+	if m.MaxAmountPerPayment != nil && m.MaxAmountPerPayment.Sign() > 0 && amount.Cmp(m.MaxAmountPerPayment) > 0 {
+		if !confirmed {
+			return p.overLimit(m.Delegator, attached, ErrCodeMandateExceeded, "amount exceeds the per-payment limit")
+		}
+		p.recordConfirmation(m.Delegator)
 	}
 
 	// Cumulative and rate limits are stateful, so they run last. The reservation
@@ -129,7 +145,7 @@ func (p MandatePolicy) Decide(_ context.Context, pc PaymentContext) Decision {
 		}
 		switch p.accounts.reserve(m, nonce, amount, p.now(), confirmed) {
 		case ErrCodeMandateBudget:
-			return p.overLimit(ErrCodeMandateBudget, "payment exceeds the mandate's cumulative budget")
+			return p.overLimit(m.Delegator, attached, ErrCodeMandateBudget, "payment exceeds the mandate's cumulative budget")
 		case ErrCodeMandateRate:
 			return rejectMandate(ErrCodeMandateRate, "payment exceeds the mandate's rate limit")
 		}
@@ -139,12 +155,28 @@ func (p MandatePolicy) Decide(_ context.Context, pc PaymentContext) Decision {
 }
 
 // overLimit turns a limit violation into an ask when AskOnExceed is set, and a
-// rejection otherwise.
-func (p MandatePolicy) overLimit(code, reason string) Decision {
+// rejection otherwise. Under the ask flow it also records the delegator's
+// history: an attached-but-invalid confirmation is a failure, none is a fresh
+// ask.
+func (p MandatePolicy) overLimit(delegator common.Address, attached bool, code, reason string) Decision {
 	if p.AskOnExceed {
+		if p.history != nil {
+			if attached {
+				p.history.recordFailure(delegator)
+			} else {
+				p.history.recordAsk(delegator, p.now())
+			}
+		}
 		return Decision{Action: ActionAsk, Code: ErrCodeConfirmationRequired, Reason: reason + "; confirm with the delegator"}
 	}
 	return rejectMandate(code, reason)
+}
+
+// recordConfirmation notes that a delegator's confirmation cleared an overage.
+func (p MandatePolicy) recordConfirmation(delegator common.Address) {
+	if p.history != nil {
+		p.history.recordConfirmation(delegator)
+	}
 }
 
 // confirmationApproves reports whether the payment carries a delegator-signed
