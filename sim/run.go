@@ -2,6 +2,7 @@ package sim
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -30,6 +31,7 @@ type Config struct {
 	Grant        x402.GrantPolicy // agent grant policy; nil pays everything
 	Mandate      *x402.Mandate    // signed for the agent if set (Delegator/Agent filled in)
 	ConfirmDepth uint64
+	Responder    *Responder // answers confirmation asks; nil never confirms
 }
 
 // spoofPayee is a fixed address outside any mandate, used by the payee-spoof
@@ -120,7 +122,8 @@ func Run(cfg Config) (Report, error) {
 	}
 
 	rep := Report{Label: cfg.Label}
-	h := harness{sim: sim}
+	h := harness{sim: sim, agent: agent, url: url, confirmDepth: cfg.ConfirmDepth,
+		delegatorKey: delegatorKey, chainID: chainID, responder: cfg.Responder}
 	for _, item := range Workload(cfg.Seed, cfg.Payments, cfg.AttackMix) {
 		rep.Payments++
 		if item.Kind == Benign {
@@ -136,7 +139,7 @@ func Run(cfg Config) (Report, error) {
 		}
 		agent.Confirmation = nil
 
-		if h.attempt(agent, url, cfg.ConfirmDepth, &rep) {
+		if h.attempt(item, &rep) {
 			rep.Settled++
 			if item.Kind == Benign {
 				rep.BenignCompleted++
@@ -151,15 +154,21 @@ func Run(cfg Config) (Report, error) {
 
 // harness bundles the moving parts an attempt needs.
 type harness struct {
-	sim *simulated.Backend
+	sim          *simulated.Backend
+	agent        *x402.Agent
+	url          string
+	confirmDepth uint64
+	delegatorKey *ecdsa.PrivateKey
+	chainID      *big.Int
+	responder    *Responder
 }
 
 // attempt runs one payment through the stack and reports whether it settled and
 // was delivered. A deferred payment is advanced to its confirm depth and
-// retried; an escalation is counted but not confirmed (the responder wires in
-// later).
-func (h harness) attempt(agent *x402.Agent, url string, confirmDepth uint64, rep *Report) bool {
-	result, err := agent.Get(url)
+// retried. A confirmation request is put to the responder: if it confirms, the
+// delegator signs a confirmation for that exact payment and the agent retries.
+func (h harness) attempt(item WorkItem, rep *Report) bool {
+	result, err := h.agent.Get(h.url)
 	if err != nil {
 		rep.Refused++
 		return false
@@ -168,15 +177,58 @@ func (h harness) attempt(agent *x402.Agent, url string, confirmDepth uint64, rep
 	case result.StatusCode == http.StatusOK && result.Paid:
 		return true
 	case result.ErrorCode == x402.ErrCodePaymentDeferred:
-		for i := uint64(0); i < confirmDepth; i++ {
+		for i := uint64(0); i < h.confirmDepth; i++ {
 			h.sim.Commit()
 		}
-		delivered, err := agent.Retry(url)
+		delivered, err := h.agent.Retry(h.url)
 		return err == nil && delivered.StatusCode == http.StatusOK
 	case result.ErrorCode == x402.ErrCodeConfirmationRequired:
 		rep.Escalations++
-		return false
+		return h.confirmAndRetry(item, result.Ask)
 	default:
 		return false
 	}
+}
+
+// confirmAndRetry asks the responder about an over-limit payment. The delegator
+// would ideally confirm a benign task and decline an attack; the responder may
+// answer wrongly or not at all. On a confirmation the delegator signs it and the
+// agent retries the same payment.
+func (h harness) confirmAndRetry(item WorkItem, ask *x402.AskRequest) bool {
+	if h.responder == nil || ask == nil {
+		return false
+	}
+	approve, responded := h.responder.Answer(item.Kind == Benign)
+	if !responded || !approve {
+		return false
+	}
+	conf, err := signConfirmation(h.delegatorKey, ask, h.chainID)
+	if err != nil {
+		return false
+	}
+	h.agent.Confirmation = conf
+	confirmed, err := h.agent.Get(h.url)
+	return err == nil && confirmed.StatusCode == http.StatusOK && confirmed.Paid
+}
+
+// signConfirmation signs a delegator confirmation matching an ask.
+func signConfirmation(key *ecdsa.PrivateKey, ask *x402.AskRequest, chainID *big.Int) (*x402.ConfirmationJSON, error) {
+	var mandateID, nonce [32]byte
+	copy(mandateID[:], common.FromHex(ask.MandateID))
+	copy(nonce[:], common.FromHex(ask.AuthorizationNonce))
+	amount, _ := new(big.Int).SetString(ask.Amount, 10)
+	c := x402.Confirmation{
+		MandateID:          mandateID,
+		AuthorizationNonce: nonce,
+		Amount:             amount,
+		Resource:           ask.Resource,
+		ValidBefore:        big.NewInt(1 << 40),
+	}
+	sig, err := x402.SignConfirmation(key, c, chainID)
+	if err != nil {
+		return nil, err
+	}
+	cj := c.ToJSON()
+	cj.Signature = "0x" + hex.EncodeToString(sig)
+	return &cj, nil
 }
