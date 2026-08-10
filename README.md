@@ -123,6 +123,8 @@ cmd/gateway/       standalone x402 gateway server (built-in or remote facilitato
 cmd/facilitator/   facilitator HTTP service: verify, settle, supported
 cmd/agent/         paying agent CLI: get (pay for a resource), register (join the identity registry)
 cmd/delegator/     delegation CLI: sign (issue a mandate), confirm (approve an over-limit payment), revoke (withdraw one)
+sim/               in-process policy lab: seeded workload, attack catalog, delegator responder, and metrics
+cmd/sim/           runs the policy lab and compares policy combinations over the same traffic
 ```
 
 ## Design notes
@@ -172,6 +174,18 @@ go run ./cmd/gateway --facilitator-url http://localhost:8403 \
 **Incremental indexing and reorgs.** The full rescan stays the verification path, but a live indexer cannot reread from genesis on every block. `SyncIncremental` reads only new blocks and keeps a window of recent blocks keyed by block hash. When a block's stored hash no longer matches the canonical chain, that block and the ones after it are rewound and the new canonical blocks are read in their place, so the same "converge to the chain" rule holds through a reorg. Blocks deeper than a finality depth are merged into the immutable aggregates; a reorg that reaches past that depth is reported as an error rather than silently rewriting settled history.
 
 **Durable settlement journal and outbox.** Without a journal the gateway keeps settlements only in memory, so a crash loses the record of what it settled. With `--journal` the gateway writes each settlement to an append-only, fsynced JSONL file before it answers the request, so the settlement is durable by the time the caller learns it succeeded; on restart the file replays to rebuild the in-memory view, and a torn final line from a crash mid-write is dropped. Publishing then follows the outbox pattern: a separate loop scans the journal and delivers unpublished settlements through a `Sink`, marking each published only after the sink acknowledges it. The default sink (`--kafka-brokers`) produces to a Kafka topic, keyed by the settlement transaction hash. Delivery is at-least-once by construction, since a crash between the produce and the marker redelivers the event, so consumers deduplicate on that hash. Journaling and publishing are both opt-in; without the flags every existing path runs unchanged.
+
+## The policy lab
+
+`cmd/sim` runs mixed benign and attack traffic through several policy combinations on the in-process simulated chain and reports how each did. Over one seeded workload it compares an unprotected baseline, the built-in mandate rules, and any decision tables you pass. The accept and grant sides are both pluggable: the gateway's accept policy can be a decision table keyed on amount, settlement stage, risk score, and confirmation count, and the agent's grant policy is the symmetric table deciding when to pay, ask, or refuse.
+
+```bash
+go run ./cmd/sim --seed 5 --payments 200 --attack-mix 0.3 \
+  --accept-table sim/testdata/accept-conservative.json \
+  --grant-table sim/testdata/grant-conservative.json
+```
+
+Reading the table: each row is one policy combination. `benign done` is the share of normal tasks that completed, the cost a policy imposes on ordinary work; `attacks thru` and `attack loss` are how many attacks settled and what they cost; `escalations` counts how often the agent had to ask the delegator. A protective combination lowers attack loss but usually lowers benign completion and raises escalations, so the columns are read together, never alone. The attack catalog pairs each attack (inflated terms, payee spoofing, an induced repeat purchase) with a benign task of the same shape. `--responder-errors` and `--responder-fatigue` model a delegator that answers confirmation requests imperfectly and tires as questions pile up; `--compare label=accept.json:grant.json` adds more table pairs; `--out report.json` writes the numbers. The same `--seed` reproduces the same report.
 
 ## Scope and limitations
 

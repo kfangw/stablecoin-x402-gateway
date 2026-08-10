@@ -44,11 +44,11 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] Delegator command: signs, renews, and revokes mandates and answers confirmation requests, giving the delegation side of the flow a concrete actor
 - [x] Confirmation history: per-delegator question counts and responses kept as policy state, so policies can see how often a delegator has been asked and how the answers went
 - [x] Settlement stage tracking: submission, configurable confirmation depths, and finality exposed as stages, with accept policies re-evaluated as a payment's stage advances
-- [ ] Agent-side grant policy hook: a pluggable rule for when to pay autonomously and when to ask, with a simulation harness for comparing policies
-- [ ] Decision-table policies: accept and grant rules loaded from a file, keyed on amount, settlement stage, risk score, and confirmation count, compared against the built-in rules in the harness
-- [ ] Traffic and adversary generators for the simulation harness, with metrics comparing policies on acceptance, losses, and escalations
-- [ ] Attack catalog for the harness: inflated payment terms, payee spoofing, and induced repeat-purchase loops, each paired with a benign task so a policy's loss reduction and its cost to normal work are measured together
-- [ ] Scripted delegator responder for the harness, with configurable error, non-response, and fatigue behavior
+- [x] Agent-side grant policy hook: a pluggable rule for when to pay autonomously and when to ask, with a simulation harness for comparing policies
+- [x] Decision-table policies: accept and grant rules loaded from a file, keyed on amount, settlement stage, risk score, and confirmation count, compared against the built-in rules in the harness
+- [x] Traffic and adversary generators for the simulation harness, with metrics comparing policies on acceptance, losses, and escalations
+- [x] Attack catalog for the harness: inflated payment terms, payee spoofing, and induced repeat-purchase loops, each paired with a benign task so a policy's loss reduction and its cost to normal work are measured together
+- [x] Scripted delegator responder for the harness, with configurable error, non-response, and fatigue behavior
 - [ ] On-chain mandate enforcement: a delegated spending contract enforcing allowance, expiry, and payee allowlist for an agent, so the same mandate terms can be enforced by the gateway or by the chain and the two compared
 - [ ] Payment sessions: one authorization covering many requests, settled periodically
 - [ ] Resource discovery endpoint listing paid resources
