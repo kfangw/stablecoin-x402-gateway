@@ -37,11 +37,11 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 ## Delegation and mandates — M2
 
 - [x] Pluggable accept-policy hook in the gateway, with the default policy reproducing the fixed always-verify rule
-- [ ] AP2-style mandates: user-signed delegations (limit, expiry, allowed payees and resources) carried with the payment and verified by the gateway, making the agent's spending authority checkable by the counterparty
-- [ ] Cumulative and rate limits in mandates: per-window spending totals and call frequency as stateful terms, enforced with gateway-side accounting alongside the per-payment checks
-- [ ] Mandate revocation: the delegator withdraws a mandate before its expiry, and the gateway rejects payments made under a revoked mandate
+- [x] AP2-style mandates: user-signed delegations (limit, expiry, allowed payees and resources) carried with the payment and verified by the gateway, making the agent's spending authority checkable by the counterparty
+- [x] Cumulative and rate limits in mandates: per-window spending totals and call frequency as stateful terms, enforced with gateway-side accounting alongside the per-payment checks
+- [x] Mandate revocation: the delegator withdraws a mandate before its expiry, and the gateway rejects payments made under a revoked mandate
 - [ ] Ask action: for a payment beyond the mandate, the gateway answers "confirm with your delegator" instead of rejecting; the agent obtains confirmation and retries
-- [ ] Delegator command: signs, renews, and revokes mandates and answers confirmation requests, giving the delegation side of the flow a concrete actor
+- [ ] Delegator command: signs, renews, and revokes mandates and answers confirmation requests, giving the delegation side of the flow a concrete actor (signing, renewal, and revocation done; answering confirmation requests lands with the Ask action)
 - [ ] Confirmation history: per-delegator question counts and responses kept as policy state, so policies can see how often a delegator has been asked and how the answers went
 - [ ] Settlement stage tracking: submission, configurable confirmation depths, and finality exposed as stages, with accept policies re-evaluated as a payment's stage advances
 - [ ] Agent-side grant policy hook: a pluggable rule for when to pay autonomously and when to ask, with a simulation harness for comparing policies

@@ -14,7 +14,7 @@ go run ./cmd/demo
 go test ./...
 ```
 
-`cmd/demo` runs the eight steps below on an in-process simulated chain (go-ethereum simulated backend). No node or external service is required.
+`cmd/demo` runs the steps below on an in-process simulated chain (go-ethereum simulated backend). No node or external service is required.
 
 ```
 1. Issue      the issuer deploys the tKRW contract and the identity registry, and mints 100,000 tKRW to the agent wallet
@@ -25,6 +25,9 @@ go test ./...
 6. Settle     the gateway verifies the signature and settles on-chain, paying for gas
 7. Reconcile  the off-chain ledger is checked against on-chain state in three ways
 8. Defend     replaying the same signature is rejected
+9. Delegate   a delegator signs a mandate and the gateway now also requires one
+10. Authorize the agent pays under the mandate, then an over-scope payment is refused with mandate_exceeded
+11. Revoke    the delegator withdraws the mandate and the next payment is refused with mandate_revoked
 ```
 
 ## Real node mode
@@ -83,15 +86,17 @@ anvil node, runs a one-shot init service that deploys the token and the identity
 registry and mints to the agents, then starts a redpanda broker, the
 facilitator, and the gateway. The gateway runs in remote mode and holds no key:
 the facilitator settles on-chain and pays the gas, and the gateway reaches the
-node only for read-only identity lookups. The gateway journals each settlement
-to the shared volume and publishes it to redpanda. The agents are separate `run`
-steps: `agent` registers itself and then pays, while `rogue-agent` skips
-registration and is refused.
+node only for read-only identity lookups. It runs with both `--identity-registry`
+and `--require-mandate`, so a payment must come from a registered agent and carry
+a valid mandate. The gateway journals each settlement to the shared volume and
+publishes it to redpanda. The agents are separate `run` steps: `agent` triggers a
+one-shot `delegator` that signs a mandate, then registers itself and pays under
+the mandate, while `rogue-agent` skips registration and is refused.
 
 ```bash
 docker compose up -d                # anvil + token/registry deploy + mint + redpanda + facilitator + gateway
 curl -s localhost:8402/premium/report     # 402 with the payment terms
-docker compose run --rm agent       # registers, then pays: HTTP 200, 500 tKRW, settlement tx
+docker compose run --rm agent       # signs a mandate, registers, pays under it: HTTP 200, 500 tKRW, settlement tx
 docker compose run --rm rogue-agent # never registers: refused with errorCode identity_unregistered
 docker compose exec redpanda rpk topic consume settlements -n 1   # the published settlement event
 docker compose down -v              # tear down (removes the shared volume)
@@ -117,6 +122,7 @@ cmd/issuer/        issuer CLI: deploy, deploy-registry, mint, reconcile against 
 cmd/gateway/       standalone x402 gateway server (built-in or remote facilitator)
 cmd/facilitator/   facilitator HTTP service: verify, settle, supported
 cmd/agent/         paying agent CLI: get (pay for a resource), register (join the identity registry)
+cmd/delegator/     delegation CLI: sign (issue a mandate), revoke (withdraw one)
 ```
 
 ## Design notes
@@ -128,6 +134,8 @@ The notes group into three: how a payment is decided and settled, how the pieces
 **Why EIP-3009.** Requiring a paying agent to hold gas is unrealistic. EIP-3009 (transferWithAuthorization) separates the payer from the settlement executor: the payer only signs, and whoever executes settlement pays for gas. This mirrors how the exact scheme of x402 uses USDC's EIP-3009; the tKRW contract here implements the same interface directly. Random 32-byte nonces, unlike sequential ones, let several authorizations be prepared in parallel without collisions, and the contract's usage record blocks replays.
 
 **Order of verification in the gateway.** On-chain submission is expensive and so is on-chain failure. The gateway therefore finishes every off-chain check first: protocol fields (version, scheme, network), payment terms (payee, amount, validity window), signature recovery, then replay and balance checks. Only then does it submit the settlement transaction, and it confirms the receipt status before serving the resource.
+
+**Mandates make delegation checkable.** An agent that pays on someone's behalf should carry proof of what it was authorized to spend. A mandate is an EIP-712 typed grant the delegator signs offline, naming the agent, a per-payment cap, allowed payees and resource prefixes, a validity window, and optional cumulative and rate limits. It rides with the payment as an additive field, so the counterparty can verify the agent's authority without a side channel, and its domain carries the chain id so it cannot be replayed on another chain. The `MandatePolicy` stacks after the identity policy and checks cheapest-first, stateful last: presence, signature, that the payer is the mandated agent, the window, revocation, the allowlists, the per-payment cap, then the cumulative and rate limits. The two window limits are stateful, so the policy reserves a payment's spend when it approves and confirms it only once settlement succeeds; a rejected or failed payment never draws down the budget. The delegator withdraws a grant by signing a revocation of its id, which the gateway records keyed by (delegator, id), so only the mandate's own delegator can revoke it. Each violation returns its own error code (`mandate_missing`, `mandate_invalid`, `mandate_expired`, `mandate_revoked`, `mandate_exceeded`, `mandate_budget_exceeded`, `mandate_rate_exceeded`). The gateway requires mandates only under `--require-mandate`; the `delegator` command signs and revokes them.
 
 **The accept decision is a policy.** Deployed payment systems differ in their accept rules: some approve optimistically before finality, some verify every payment, some release only after settlement. The gateway makes this rule an explicit, swappable component instead of hard-coded control flow; the default `AlwaysVerify` policy reproduces the original behavior, approving exactly when verification passed. The policy runs before settlement and only decides, so rejecting a payment stops it short of any on-chain transaction. This mirrors how x402 V2 exposes the release decision as a lifecycle hook. A `Decision` carries one of five actions (approve, reject, defer, ask, require-bond) with a machine-readable error code, and a `Chain` evaluates policies in order and returns the first non-approval, so identity, mandate, and verification checks stack without any of them knowing about the others. Only approve settles; every other action becomes a 402 with its own `errorCode`.
 
@@ -170,6 +178,7 @@ This repository verifies protocol flows; it is not a production implementation. 
 - The contract is unaudited and the token uses zero decimals. Regulatory requirements such as reserve attestation, allowlists, and freezing are out of scope.
 - The gateway can run the facilitator in-process or delegate to a remote one, but the facilitator itself is a single instance with no authentication, rate limiting, or horizontal scaling.
 - Agent identity uses a minimal local registry that records a registration flag and an agent-card URL. The card is stored but not fetched or validated, and the wider ERC-8004 identity and reputation surface is out of scope. A deployed registry would replace the local one behind the same read-only reader interface.
+- Mandate cumulative and rate accounting, and the set of revoked mandates, live in gateway memory, so both reset if the gateway restarts. Making them durable belongs with the decision log, and on-chain mandate enforcement is a separate roadmap item.
 - The ledger keeps incremental indexing and reorg handling, but its state is in-memory and the reconciliation path still rescans from genesis; durable ledger storage is out of scope. Settlements can be journaled durably with `--journal`, but the ledger itself is not.
 - Keys are supplied via environment variables and live in process memory; production deployments assume KMS or HSM custody.
 
