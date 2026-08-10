@@ -51,6 +51,10 @@ type Gateway struct {
 	// AlwaysVerify is used, which approves exactly when verification passed.
 	Policy Policy
 
+	// Scorer, if set, fills PaymentContext.RiskScore before the policy runs. The
+	// default (nil) leaves the score at 0.
+	Scorer func(PaymentContext) float64
+
 	// Journal, if set, durably records each settlement before the gateway
 	// answers, so settlements survive a crash and an outbox can publish them.
 	// When nil the gateway keeps its original in-memory-only behavior.
@@ -209,7 +213,7 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 
 	// The accept decision is a swappable policy, evaluated before settlement.
 	pc := PaymentContext{Payload: p, Requirements: reqs, Verification: vr, Stage: StagePreSettlement}
-	g.attachHistory(&pc)
+	g.enrich(&pc)
 	d := g.policy().Decide(ctx, pc)
 	switch d.Action {
 	case ActionApprove:
@@ -323,7 +327,7 @@ func (g *Gateway) resumeDeferred(ctx context.Context, p PaymentPayload, reqs Pay
 		Verification: &VerifyResult{IsValid: true, Payer: df.record.Payer.Hex()},
 		Stage:        stage,
 	}
-	g.attachHistory(&pc)
+	g.enrich(&pc)
 	if d := g.policy().Decide(ctx, pc); d.Action != ActionApprove {
 		code := d.Code
 		if code == "" {
@@ -335,12 +339,16 @@ func (g *Gateway) resumeDeferred(ctx context.Context, p PaymentPayload, reqs Pay
 	return df.record, nil
 }
 
-// attachHistory populates pc.History from the mandate policy, keyed by the
-// payload's declared delegator, so a policy can read it.
-func (g *Gateway) attachHistory(pc *PaymentContext) {
+// enrich fills the context a policy reads: the delegator's confirmation history
+// (from the mandate policy, keyed by the payload's declared delegator) and the
+// risk score (from the scorer hook).
+func (g *Gateway) enrich(pc *PaymentContext) {
 	if mp, ok := g.mandatePolicy(); ok && pc.Payload.Mandate != nil {
 		h := mp.DelegatorHistory(common.HexToAddress(pc.Payload.Mandate.Mandate.Delegator))
 		pc.History = &h
+	}
+	if g.Scorer != nil {
+		pc.RiskScore = g.Scorer(*pc)
 	}
 }
 

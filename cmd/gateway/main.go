@@ -51,6 +51,7 @@ func run() error {
 	askOnExceed := fs.Bool("ask-on-exceed", false, "answer over-limit payments with confirmation_required instead of rejecting (requires --require-mandate)")
 	deferAbove := fs.Int64("defer-above", 0, "defer delivery for payments at or above this amount until confirmed (requires --require-mandate)")
 	confirmDepth := fs.Uint64("confirm-depth", 0, "blocks a deferred settlement must be deep before delivery")
+	acceptTable := fs.String("accept-table", "", "accept decision-table JSON file to add to the policy chain")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
@@ -111,6 +112,13 @@ func run() error {
 		gw.ConfirmDepth = *confirmDepth
 	} else if *askOnExceed || *deferAbove > 0 {
 		return fmt.Errorf("--ask-on-exceed and --defer-above require --require-mandate")
+	}
+
+	// Optional accept decision table, appended to the policy chain.
+	if *acceptTable != "" {
+		if err := attachAcceptTable(gw, *acceptTable); err != nil {
+			return err
+		}
 	}
 
 	// Optional durability: journal every settlement before answering, and (if
@@ -248,6 +256,25 @@ func attachMandate(gw *x402.Gateway, askOnExceed bool, deferAbove int64) error {
 	}
 	gw.Policy = append(base, mp)
 	log.Printf("mandate policy on: chain id %s, ask-on-exceed %v, defer-above %d", chainID, askOnExceed, deferAbove)
+	return nil
+}
+
+// attachAcceptTable loads an accept decision table and appends it to the chain.
+func attachAcceptTable(gw *x402.Gateway, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read accept table: %w", err)
+	}
+	tp, err := x402.LoadTablePolicy(data)
+	if err != nil {
+		return err
+	}
+	base := x402.Chain{x402.AlwaysVerify{}}
+	if c, ok := gw.Policy.(x402.Chain); ok {
+		base = c
+	}
+	gw.Policy = append(base, tp)
+	log.Printf("accept table on: %s", path)
 	return nil
 }
 

@@ -52,6 +52,10 @@ type PaymentContext struct {
 	// Stage is the settlement stage at decision time. It is StagePreSettlement on
 	// the first evaluation and advances when a deferred payment is re-evaluated.
 	Stage Stage
+	// RiskScore is an externally supplied score for this payment, filled by the
+	// gateway's scorer hook (0 by default). How it is computed is out of scope
+	// here; a policy only reads it.
+	RiskScore float64
 }
 
 // Policy decides whether the gateway should approve a payment. Implementations

@@ -1,0 +1,6 @@
+{
+  "default": "refuse",
+  "rules": [
+    {"when": {"amountMax": "10000"}, "then": "pay"}
+  ]
+}

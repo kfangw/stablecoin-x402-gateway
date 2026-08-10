@@ -77,6 +77,7 @@ func runGet(args []string) error {
 	max := fs.Int64("max", 1000, "delegated spending limit in tKRW")
 	mandateFile := fs.String("mandate", "", "signed mandate file to attach to the payment")
 	confirmationFile := fs.String("confirmation", "", "signed confirmation file to attach when retrying an over-limit payment")
+	grantTable := fs.String("grant-table", "", "grant decision-table JSON file deciding whether to pay")
 	fs.Parse(args)
 
 	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
@@ -124,6 +125,17 @@ func runGet(args []string) error {
 			return err
 		}
 		agent.Confirmation = confirmation
+	}
+	if *grantTable != "" {
+		data, err := os.ReadFile(*grantTable)
+		if err != nil {
+			return fmt.Errorf("read grant table: %w", err)
+		}
+		grant, err := x402.LoadTableGrant(data)
+		if err != nil {
+			return err
+		}
+		agent.Grant = grant
 	}
 	fmt.Printf("agent wallet %s, delegated limit %d tKRW\n", agent.Wallet.Address.Hex(), *max)
 

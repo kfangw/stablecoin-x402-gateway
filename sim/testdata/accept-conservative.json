@@ -1,0 +1,7 @@
+{
+  "default": "reject",
+  "rules": [
+    {"when": {"amountMax": "500", "riskMax": 0.3}, "then": "approve"},
+    {"when": {"amountMax": "2000", "riskMax": 0.6, "asksMax": 3}, "then": "ask"}
+  ]
+}

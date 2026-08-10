@@ -1,0 +1,6 @@
+{
+  "default": "reject",
+  "rules": [
+    {"when": {"riskMax": 0.95}, "then": "approve"}
+  ]
+}
