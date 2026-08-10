@@ -49,6 +49,8 @@ func run() error {
 	identityRegistry := fs.String("identity-registry", "", "identity registry address; when set, unregistered agents are rejected")
 	requireMandate := fs.Bool("require-mandate", false, "require a delegator-signed mandate with each payment")
 	askOnExceed := fs.Bool("ask-on-exceed", false, "answer over-limit payments with confirmation_required instead of rejecting (requires --require-mandate)")
+	deferAbove := fs.Int64("defer-above", 0, "defer delivery for payments at or above this amount until confirmed (requires --require-mandate)")
+	confirmDepth := fs.Uint64("confirm-depth", 0, "blocks a deferred settlement must be deep before delivery")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
@@ -103,11 +105,12 @@ func run() error {
 	// Optional mandate policy: require a delegator-signed mandate with each
 	// payment. It stacks after any identity policy in the chain.
 	if *requireMandate {
-		if err := attachMandate(gw, *askOnExceed); err != nil {
+		if err := attachMandate(gw, *askOnExceed, *deferAbove); err != nil {
 			return err
 		}
-	} else if *askOnExceed {
-		return fmt.Errorf("--ask-on-exceed requires --require-mandate")
+		gw.ConfirmDepth = *confirmDepth
+	} else if *askOnExceed || *deferAbove > 0 {
+		return fmt.Errorf("--ask-on-exceed and --defer-above require --require-mandate")
 	}
 
 	// Optional durability: journal every settlement before answering, and (if
@@ -229,7 +232,7 @@ func attachIdentity(gw *x402.Gateway, client *ethclient.Client, registryAddr, rp
 
 // attachMandate appends a mandate policy to the gateway's chain, so a payment
 // must carry a delegator-signed mandate scoped to its chain id.
-func attachMandate(gw *x402.Gateway, askOnExceed bool) error {
+func attachMandate(gw *x402.Gateway, askOnExceed bool, deferAbove int64) error {
 	chainID, err := chainIDFromNetwork(gw.Network)
 	if err != nil {
 		return err
@@ -240,8 +243,11 @@ func attachMandate(gw *x402.Gateway, askOnExceed bool) error {
 	}
 	mp := x402.NewMandatePolicy(chainID)
 	mp.AskOnExceed = askOnExceed
+	if deferAbove > 0 {
+		mp.DeferAbove = big.NewInt(deferAbove)
+	}
 	gw.Policy = append(base, mp)
-	log.Printf("mandate policy on: chain id %s, ask-on-exceed %v", chainID, askOnExceed)
+	log.Printf("mandate policy on: chain id %s, ask-on-exceed %v, defer-above %d", chainID, askOnExceed, deferAbove)
 	return nil
 }
 

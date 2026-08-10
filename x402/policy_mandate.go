@@ -26,6 +26,10 @@ type MandatePolicy struct {
 	// rejection. Entitlement violations (signature, revocation, scope) are never
 	// asked. A valid confirmation bound to the payment promotes it to approval.
 	AskOnExceed bool
+	// DeferAbove, when positive, defers settlement delivery for payments at or
+	// above this amount: the gateway settles but withholds the resource until the
+	// settlement reaches the confirm depth. Zero disables deferral.
+	DeferAbove *big.Int
 	// accounts holds the cumulative and rate windows. It is nil for a
 	// scope-only policy and set by NewMandatePolicy; the gateway uses the
 	// constructor so accounting is on whenever mandates are required.
@@ -137,8 +141,10 @@ func (p MandatePolicy) Decide(_ context.Context, pc PaymentContext) Decision {
 	// counts this payment against the windows immediately; the gateway confirms
 	// it on settlement success and drops it otherwise, so a rejected or failed
 	// payment never spends the budget. A confirmation waives the budget check
-	// (but never the rate cap) while still recording the spend.
-	if p.accounts != nil {
+	// (but never the rate cap) while still recording the spend. On a deferred
+	// payment's later re-evaluation the settlement already happened, so the
+	// accounting was done on the first pass and must not run again.
+	if p.accounts != nil && pc.Stage == StagePreSettlement {
 		nonce, ok := paymentNonce(pc)
 		if !ok {
 			return rejectMandate(ErrCodeMandateInvalid, "payment nonce is unreadable")
@@ -149,6 +155,13 @@ func (p MandatePolicy) Decide(_ context.Context, pc PaymentContext) Decision {
 		case ErrCodeMandateRate:
 			return rejectMandate(ErrCodeMandateRate, "payment exceeds the mandate's rate limit")
 		}
+	}
+
+	// A large payment is delivered only once its settlement is deep enough. The
+	// gateway settles it now and re-evaluates as the stage advances; here the
+	// policy holds delivery until the confirmed stage.
+	if p.DeferAbove != nil && p.DeferAbove.Sign() > 0 && amount.Cmp(p.DeferAbove) >= 0 && pc.Stage < StageConfirmed {
+		return Decision{Action: ActionDefer, Code: ErrCodePaymentDeferred, Reason: "large payment delivered after settlement confirmations"}
 	}
 
 	return Decision{Action: ActionApprove}

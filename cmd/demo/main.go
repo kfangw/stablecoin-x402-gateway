@@ -222,7 +222,8 @@ func run() error {
 	delegatorKey, _ := crypto.GenerateKey()
 	delegator := crypto.PubkeyToAddress(delegatorKey.PublicKey)
 	mandatePolicy := x402.NewMandatePolicy(chainID)
-	mandatePolicy.AskOnExceed = true // over-limit payments ask instead of failing
+	mandatePolicy.AskOnExceed = true            // over-limit payments ask instead of failing
+	mandatePolicy.DeferAbove = big.NewInt(1000) // payments >= 1000 wait for confirmations
 	gw.Policy = x402.Chain{
 		x402.AlwaysVerify{},
 		x402.IdentityPolicy{Registry: reg},
@@ -325,7 +326,45 @@ func run() error {
 		return fmt.Errorf("payment under a revoked mandate should be mandate_revoked, got %q", revoked.ErrorCode)
 	}
 
-	fmt.Println("demo complete: identity, signed payment, settlement, reconciliation, replay rejection, and the mandate lifecycle (grant, pay, ask and confirm, revoke)")
+	fmt.Println("== 13. A large payment is delivered only after confirmations ==")
+	gw.ConfirmDepth = 2
+	gw.Price = big.NewInt(2000)        // a large purchase
+	agent.MaxAmount = big.NewInt(5000) // raise the client-side limit for it
+	bigMandate, err := signedMandate(delegatorKey, x402.Mandate{
+		Delegator:           delegator,
+		Agent:               agentWallet.Address,
+		MaxAmountPerPayment: big.NewInt(2000),
+		AllowedPayees:       []common.Address{gatewayAddr},
+		ValidAfter:          big.NewInt(0),
+		ValidBefore:         big.NewInt(time.Now().Unix() + 3600),
+		BudgetAmount:        big.NewInt(100_000),
+		MandateID:           [32]byte{0x03},
+	}, chainID)
+	if err != nil {
+		return err
+	}
+	agent.Mandate = bigMandate
+	agent.Confirmation = nil
+	deferred, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("   HTTP %d, errorCode %q (settled, delivery held for %d confirmations)\n", deferred.StatusCode, deferred.ErrorCode, gw.ConfirmDepth)
+	if deferred.ErrorCode != x402.ErrCodePaymentDeferred {
+		return fmt.Errorf("large payment should be payment_deferred, got %q", deferred.ErrorCode)
+	}
+	sim.Commit() // advance the chain to the confirm depth
+	sim.Commit()
+	delivered, err := agent.Retry(server.URL + "/premium/report")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("   after %d blocks, the same payment delivers: HTTP %d\n\n", gw.ConfirmDepth, delivered.StatusCode)
+	if delivered.StatusCode != http.StatusOK {
+		return fmt.Errorf("deferred payment should deliver once confirmed, got %d %q", delivered.StatusCode, delivered.ErrorCode)
+	}
+
+	fmt.Println("demo complete: identity, signed payment, settlement, reconciliation, replay rejection, and the mandate lifecycle (grant, pay, ask and confirm, revoke, deferred delivery)")
 	return nil
 }
 

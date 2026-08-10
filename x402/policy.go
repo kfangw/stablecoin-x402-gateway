@@ -27,6 +27,17 @@ type Decision struct {
 	Reason string
 }
 
+// Stage is how far a payment's settlement has progressed. A policy that defers
+// a payment is re-evaluated as its stage advances, so it can hold delivery until
+// the settlement is deep enough.
+type Stage int
+
+const (
+	StagePreSettlement Stage = iota // not yet settled
+	StageSubmitted                  // settled and in a block, below the confirm depth
+	StageConfirmed                  // settled at least the confirm depth blocks deep
+)
+
 // PaymentContext is everything the gateway knows about a payment at decision
 // time.
 type PaymentContext struct {
@@ -38,6 +49,9 @@ type PaymentContext struct {
 	// History, when set, is a snapshot of the payment delegator's confirmation
 	// history, so a policy can weigh how often this delegator has been asked.
 	History *DelegatorHistory
+	// Stage is the settlement stage at decision time. It is StagePreSettlement on
+	// the first evaluation and advances when a deferred payment is re-evaluated.
+	Stage Stage
 }
 
 // Policy decides whether the gateway should approve a payment. Implementations

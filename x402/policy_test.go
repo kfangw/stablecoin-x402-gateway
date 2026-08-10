@@ -146,20 +146,22 @@ func (f fixedAction) Decide(context.Context, x402.PaymentContext) x402.Decision 
 	return x402.Decision{Action: f.a}
 }
 
-// Each non-approval outcome must reach the client as its own 402 error code,
-// and only approve must settle.
+// Each non-approval outcome must reach the client as its own 402 error code.
+// Approve serves the resource; defer settles but withholds it (payment_deferred);
+// the other refusals settle nothing.
 func TestOutcomeMapsToErrorCode(t *testing.T) {
 	cases := []struct {
 		name     string
 		action   x402.Action
-		settles  bool
+		wantOK   bool // serves the resource (HTTP 200)
+		settled  bool // a settlement was recorded
 		wantCode string
 	}{
-		{"approve", x402.ActionApprove, true, ""},
-		{"reject", x402.ActionReject, false, x402.ErrCodePolicyRejected},
-		{"defer", x402.ActionDefer, false, x402.ErrCodePaymentDeferred},
-		{"ask", x402.ActionAsk, false, x402.ErrCodeConfirmationRequired},
-		{"bond", x402.ActionRequireBond, false, x402.ErrCodeBondRequired},
+		{"approve", x402.ActionApprove, true, true, ""},
+		{"reject", x402.ActionReject, false, false, x402.ErrCodePolicyRejected},
+		{"defer", x402.ActionDefer, false, true, x402.ErrCodePaymentDeferred},
+		{"ask", x402.ActionAsk, false, false, x402.ErrCodeConfirmationRequired},
+		{"bond", x402.ActionRequireBond, false, false, x402.ErrCodeBondRequired},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,23 +172,24 @@ func TestOutcomeMapsToErrorCode(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if tc.settles {
+			if tc.wantOK {
 				if result.StatusCode != http.StatusOK {
 					t.Fatalf("status = %d, want 200", result.StatusCode)
 				}
-				if len(f.gateway.Settlements) != 1 {
-					t.Errorf("settlements = %d, want 1", len(f.gateway.Settlements))
+			} else {
+				if result.StatusCode != http.StatusPaymentRequired {
+					t.Fatalf("status = %d, want 402", result.StatusCode)
 				}
-				return
+				if result.ErrorCode != tc.wantCode {
+					t.Errorf("errorCode = %q, want %q", result.ErrorCode, tc.wantCode)
+				}
 			}
-			if result.StatusCode != http.StatusPaymentRequired {
-				t.Fatalf("status = %d, want 402", result.StatusCode)
+			want := 0
+			if tc.settled {
+				want = 1
 			}
-			if result.ErrorCode != tc.wantCode {
-				t.Errorf("errorCode = %q, want %q", result.ErrorCode, tc.wantCode)
-			}
-			if len(f.gateway.Settlements) != 0 {
-				t.Errorf("settlements = %d, want 0 (no settlement on refusal)", len(f.gateway.Settlements))
+			if len(f.gateway.Settlements) != want {
+				t.Errorf("settlements = %d, want %d", len(f.gateway.Settlements), want)
 			}
 		})
 	}

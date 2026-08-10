@@ -11,6 +11,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 )
@@ -55,8 +56,22 @@ type Gateway struct {
 	// When nil the gateway keeps its original in-memory-only behavior.
 	Journal *Journal
 
+	// ConfirmDepth is how many blocks deep a deferred settlement must be before
+	// the gateway delivers the resource. It only matters when a policy defers.
+	ConfirmDepth uint64
+
 	mu          sync.Mutex
 	Settlements []SettlementRecord
+
+	inflightMu sync.Mutex
+	inflight   map[[32]byte]*deferredSettlement
+}
+
+// deferredSettlement is a settled-but-not-yet-delivered payment, kept until its
+// settlement reaches the confirm depth. It is keyed by the payment's nonce.
+type deferredSettlement struct {
+	record         SettlementRecord
+	submittedBlock uint64
 }
 
 // SettlementRecord describes a settlement the gateway executed.
@@ -171,53 +186,66 @@ type failure struct {
 
 // verifyAndSettle runs the payment through the facilitator (verify, then
 // settle) and records the outcome. It returns a nil failure on success, or a
-// failure carrying the 402 error code and reason.
+// failure carrying the 402 error code and reason. A payment already in flight
+// (deferred) skips verification and is re-evaluated for delivery.
 func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs PaymentRequirements) (SettlementRecord, *failure) {
 	var p PaymentPayload
 	if err := DecodeHeader(header, &p); err != nil {
 		return SettlementRecord{}, &failure{Code: ErrCodeInvalidHeader, Reason: fmt.Sprintf("invalid X-PAYMENT header: %v", err)}
 	}
 
-	fac := g.facilitator()
+	// A deferred payment retried with the same authorization is not a replay:
+	// its settlement is already on chain, so re-verifying would fail on the used
+	// nonce. Resume it instead.
+	nonce, _ := payloadNonce(p)
+	if df, ok := g.inflightGet(nonce); ok {
+		return g.resumeDeferred(ctx, p, reqs, nonce, df)
+	}
 
-	vr, err := fac.Verify(ctx, p, reqs)
+	vr, err := g.facilitator().Verify(ctx, p, reqs)
 	if err != nil {
 		return SettlementRecord{}, &failure{Code: ErrCodeVerificationError, Reason: fmt.Sprintf("verification error: %v", err)}
 	}
 
 	// The accept decision is a swappable policy, evaluated before settlement.
-	// A non-approval carries the policy's own code and reason, falling back to
-	// the outcome's default code and the facilitator's reason when either is
-	// empty. The default AlwaysVerify sets verification_failed, matching the
-	// original behavior.
-	pc := PaymentContext{Payload: p, Requirements: reqs, Verification: vr}
-	// Expose the delegator's confirmation history (a snapshot from before this
-	// payment) so a policy can weigh it.
-	if mp, ok := g.mandatePolicy(); ok && p.Mandate != nil {
-		h := mp.DelegatorHistory(common.HexToAddress(p.Mandate.Mandate.Delegator))
-		pc.History = &h
+	pc := PaymentContext{Payload: p, Requirements: reqs, Verification: vr, Stage: StagePreSettlement}
+	g.attachHistory(&pc)
+	d := g.policy().Decide(ctx, pc)
+	switch d.Action {
+	case ActionApprove:
+		return g.settle(ctx, p, reqs, pc)
+	case ActionDefer:
+		return g.beginDeferred(ctx, p, reqs, pc, nonce)
+	default:
+		return SettlementRecord{}, g.refusal(d, pc, vr)
 	}
-	if d := g.policy().Decide(ctx, pc); d.Action != ActionApprove {
-		code := d.Code
-		if code == "" {
-			code = codeForAction(d.Action)
-		}
-		reason := d.Reason
-		if reason == "" {
-			reason = "payment verification failed"
-			if vr != nil && vr.InvalidReason != "" {
-				reason = vr.InvalidReason
-			}
-		}
-		f := &failure{Code: code, Reason: reason}
-		if d.Action == ActionAsk {
-			f.Ask = askFromContext(pc)
-		}
-		return SettlementRecord{}, f
-	}
+}
 
-	// The policy approved, so any reservation it made must be finalized: notify
-	// settlers with the outcome of every path from here on.
+// refusal builds the 402 failure for a non-approval decision. It falls back to
+// the outcome's default code and the facilitator's reason when the policy left
+// either empty.
+func (g *Gateway) refusal(d Decision, pc PaymentContext, vr *VerifyResult) *failure {
+	code := d.Code
+	if code == "" {
+		code = codeForAction(d.Action)
+	}
+	reason := d.Reason
+	if reason == "" {
+		reason = "payment verification failed"
+		if vr != nil && vr.InvalidReason != "" {
+			reason = vr.InvalidReason
+		}
+	}
+	f := &failure{Code: code, Reason: reason}
+	if d.Action == ActionAsk {
+		f.Ask = askFromContext(pc)
+	}
+	return f
+}
+
+// settle submits the payment, journals it, records it, and notifies settlers of
+// the outcome, returning the settlement record or a failure.
+func (g *Gateway) settle(ctx context.Context, p PaymentPayload, reqs PaymentRequirements, pc PaymentContext) (SettlementRecord, *failure) {
 	settlers := g.settlers()
 	notify := func(ok bool) {
 		for _, s := range settlers {
@@ -225,7 +253,7 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 		}
 	}
 
-	sr, err := fac.Settle(ctx, p, reqs)
+	sr, err := g.facilitator().Settle(ctx, p, reqs)
 	if err != nil {
 		notify(false)
 		return SettlementRecord{}, &failure{Code: ErrCodeSettlementError, Reason: fmt.Sprintf("settlement error: %v", err)}
@@ -239,7 +267,6 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 		return SettlementRecord{}, &failure{Code: ErrCodeSettlementFailed, Reason: reason}
 	}
 
-	// Reconstruct the record from the (already validated) payload and receipt.
 	auth, _, err := parseExactPayload(p.Payload)
 	if err != nil {
 		notify(false)
@@ -265,6 +292,131 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	g.Settlements = append(g.Settlements, record)
 	g.mu.Unlock()
 	return record, nil
+}
+
+// beginDeferred settles a deferred payment now but withholds delivery: it
+// records the settlement in the in-flight map and answers payment_deferred with
+// the settlement transaction, inviting the agent to retry the same payment.
+func (g *Gateway) beginDeferred(ctx context.Context, p PaymentPayload, reqs PaymentRequirements, pc PaymentContext, nonce [32]byte) (SettlementRecord, *failure) {
+	record, fail := g.settle(ctx, p, reqs, pc)
+	if fail != nil {
+		return SettlementRecord{}, fail
+	}
+	g.inflightPut(nonce, &deferredSettlement{record: record, submittedBlock: g.submittedBlock(ctx, record.TxHash)})
+	return SettlementRecord{}, &failure{
+		Code:   ErrCodePaymentDeferred,
+		Reason: fmt.Sprintf("settled in %s; delivered after %d confirmations, retry the same payment", record.TxHash.Hex(), g.ConfirmDepth),
+	}
+}
+
+// resumeDeferred re-evaluates an in-flight deferred payment at its current stage.
+// It delivers when the policy approves and otherwise answers payment_deferred
+// again. Delivery removes the entry first, so a payment is never delivered twice.
+func (g *Gateway) resumeDeferred(ctx context.Context, p PaymentPayload, reqs PaymentRequirements, nonce [32]byte, df *deferredSettlement) (SettlementRecord, *failure) {
+	stage, err := g.stageOf(ctx, df.submittedBlock)
+	if err != nil {
+		return SettlementRecord{}, &failure{Code: ErrCodeSettlementError, Reason: fmt.Sprintf("settlement stage: %v", err)}
+	}
+	pc := PaymentContext{
+		Payload:      p,
+		Requirements: reqs,
+		Verification: &VerifyResult{IsValid: true, Payer: df.record.Payer.Hex()},
+		Stage:        stage,
+	}
+	g.attachHistory(&pc)
+	if d := g.policy().Decide(ctx, pc); d.Action != ActionApprove {
+		code := d.Code
+		if code == "" {
+			code = codeForAction(d.Action)
+		}
+		return SettlementRecord{}, &failure{Code: code, Reason: d.Reason}
+	}
+	g.inflightRemove(nonce)
+	return df.record, nil
+}
+
+// attachHistory populates pc.History from the mandate policy, keyed by the
+// payload's declared delegator, so a policy can read it.
+func (g *Gateway) attachHistory(pc *PaymentContext) {
+	if mp, ok := g.mandatePolicy(); ok && pc.Payload.Mandate != nil {
+		h := mp.DelegatorHistory(common.HexToAddress(pc.Payload.Mandate.Mandate.Delegator))
+		pc.History = &h
+	}
+}
+
+// stageOf maps a settlement's depth to a stage. A settlement block above the
+// current head means a reorg dropped it, which is reported as an error, matching
+// the ledger's handling of a reorg past finality.
+func (g *Gateway) stageOf(ctx context.Context, submittedBlock uint64) (Stage, error) {
+	head, err := g.currentBlock(ctx)
+	if err != nil {
+		return StagePreSettlement, err
+	}
+	if head < submittedBlock {
+		return StagePreSettlement, fmt.Errorf("settlement block %d rolled back below head %d", submittedBlock, head)
+	}
+	if head-submittedBlock >= g.ConfirmDepth {
+		return StageConfirmed, nil
+	}
+	return StageSubmitted, nil
+}
+
+// currentBlock reads the chain head height from the backend.
+func (g *Gateway) currentBlock(ctx context.Context) (uint64, error) {
+	hr, ok := g.Backend.(interface {
+		HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
+	})
+	if !ok {
+		return 0, fmt.Errorf("backend cannot read the chain head")
+	}
+	h, err := hr.HeaderByNumber(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	return h.Number.Uint64(), nil
+}
+
+// submittedBlock returns the block a settlement transaction landed in, or 0 if
+// the receipt is unavailable.
+func (g *Gateway) submittedBlock(ctx context.Context, txHash common.Hash) uint64 {
+	r, err := g.Backend.TransactionReceipt(ctx, txHash)
+	if err != nil || r == nil || r.BlockNumber == nil {
+		return 0
+	}
+	return r.BlockNumber.Uint64()
+}
+
+func (g *Gateway) inflightGet(nonce [32]byte) (*deferredSettlement, bool) {
+	g.inflightMu.Lock()
+	defer g.inflightMu.Unlock()
+	df, ok := g.inflight[nonce]
+	return df, ok
+}
+
+func (g *Gateway) inflightPut(nonce [32]byte, df *deferredSettlement) {
+	g.inflightMu.Lock()
+	defer g.inflightMu.Unlock()
+	if g.inflight == nil {
+		g.inflight = make(map[[32]byte]*deferredSettlement)
+	}
+	g.inflight[nonce] = df
+}
+
+func (g *Gateway) inflightRemove(nonce [32]byte) {
+	g.inflightMu.Lock()
+	defer g.inflightMu.Unlock()
+	delete(g.inflight, nonce)
+}
+
+// payloadNonce reads the authorization nonce from a payment payload.
+func payloadNonce(p PaymentPayload) ([32]byte, bool) {
+	var n [32]byte
+	b := common.FromHex(p.Payload.Authorization.Nonce)
+	if len(b) != 32 {
+		return n, false
+	}
+	copy(n[:], b)
+	return n, true
 }
 
 // askFromContext names the payment a confirmation must be signed for.

@@ -8,6 +8,7 @@ package e2e
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/hex"
 	"fmt"
 	"math/big"
@@ -19,7 +20,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/ledger"
@@ -360,5 +363,211 @@ func TestE2EMandateAgainstRealNode(t *testing.T) {
 		t.Fatal(err)
 	} else if r.ErrorCode != x402.ErrCodeMandateRevoked {
 		t.Fatalf("after revocation = %q, want mandate_revoked", r.ErrorCode)
+	}
+}
+
+// mandateGatewayFor builds a token, mints to the agent, and returns a gateway
+// with a mandate policy, for the ask and defer end-to-end tests.
+func mandateGatewayFor(t *testing.T, ctx context.Context, client *ethclient.Client, chainID *big.Int, mp x402.MandatePolicy, confirmDepth uint64) (*x402.Gateway, *httptest.Server, *x402.Agent, common.Address) {
+	t.Helper()
+	issuerKey, _ := crypto.HexToECDSA(anvilKey0)
+	gatewayKey, _ := crypto.HexToECDSA(anvilKey1)
+	agentKey, _ := crypto.HexToECDSA(anvilKey2)
+	issuerOpts, _ := bind.NewKeyedTransactorWithChainID(issuerKey, chainID)
+	gatewayOpts, _ := bind.NewKeyedTransactorWithChainID(gatewayKey, chainID)
+	gatewayAddr := crypto.PubkeyToAddress(gatewayKey.PublicKey)
+	agentWallet := wallet.FromKey(agentKey)
+
+	tok, deployTx, err := token.Deploy(issuerOpts, client)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+	if _, err := bind.WaitDeployed(ctx, client, deployTx); err != nil {
+		t.Fatalf("wait deploy: %v", err)
+	}
+	mintTx, err := tok.Mint(issuerOpts, agentWallet.Address, big.NewInt(100_000))
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, mintTx); err != nil {
+		t.Fatalf("wait mint: %v", err)
+	}
+
+	gw := &x402.Gateway{
+		Token:        tok,
+		Backend:      client,
+		Transactor:   gatewayOpts,
+		PayTo:        gatewayAddr,
+		Price:        big.NewInt(500),
+		Network:      fmt.Sprintf("eip155:%s", chainID),
+		Policy:       x402.Chain{x402.AlwaysVerify{}, mp},
+		ConfirmDepth: confirmDepth,
+	}
+	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"report":"market report body","paid":true}`)
+	})
+	server := httptest.NewServer(gw.Middleware(resource))
+	t.Cleanup(server.Close)
+
+	domain, err := tok.DomainSeparator()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &x402.Agent{Wallet: agentWallet, DomainSeparator: domain, MaxAmount: big.NewInt(5000)}
+	return gw, server, agent, gatewayAddr
+}
+
+// mineBlocks advances the chain by n blocks with throwaway self-transfers, so a
+// deferred settlement can reach its confirm depth on a live node.
+func mineBlocks(t *testing.T, ctx context.Context, client *ethclient.Client, chainID *big.Int, n int) {
+	t.Helper()
+	key, _ := crypto.HexToECDSA(anvilKey0)
+	from := crypto.PubkeyToAddress(key.PublicKey)
+	for i := 0; i < n; i++ {
+		nonce, err := client.PendingNonceAt(ctx, from)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gasPrice, err := client.SuggestGasPrice(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tx := types.NewTransaction(nonce, from, big.NewInt(0), 21000, gasPrice, nil)
+		signed, err := types.SignTx(tx, types.LatestSignerForChainID(chainID), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.SendTransaction(ctx, signed); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bind.WaitMined(ctx, client, signed); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func signMandateFor(t *testing.T, key *ecdsa.PrivateKey, m x402.Mandate, chainID *big.Int) *x402.SignedMandateJSON {
+	t.Helper()
+	sig, err := x402.SignMandate(key, m, chainID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &x402.SignedMandateJSON{Mandate: m.ToJSON(), Signature: "0x" + hex.EncodeToString(sig)}
+}
+
+// TestE2EAskAgainstRealNode: an over-limit payment asks the delegator, and a
+// retry carrying the confirmation settles.
+func TestE2EAskAgainstRealNode(t *testing.T) {
+	rpcURL := os.Getenv("E2E_RPC_URL")
+	if rpcURL == "" {
+		t.Skip("E2E_RPC_URL not set; skipping live-node end-to-end test")
+	}
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, rpcURL)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	dk, _ := crypto.GenerateKey()
+	delegator := crypto.PubkeyToAddress(dk.PublicKey)
+	mp := x402.NewMandatePolicy(chainID)
+	mp.AskOnExceed = true
+	gw, server, agent, gatewayAddr := mandateGatewayFor(t, ctx, client, chainID, mp, 0)
+
+	m := x402.Mandate{
+		Delegator:           delegator,
+		Agent:               agent.Wallet.Address,
+		MaxAmountPerPayment: big.NewInt(100), // 500 exceeds it
+		AllowedPayees:       []common.Address{gatewayAddr},
+		ValidAfter:          big.NewInt(0),
+		ValidBefore:         big.NewInt(1 << 40),
+		MandateID:           [32]byte{0x21},
+	}
+	agent.Mandate = signMandateFor(t, dk, m, chainID)
+
+	asked, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asked.ErrorCode != x402.ErrCodeConfirmationRequired || asked.Ask == nil {
+		t.Fatalf("asked = %q, want confirmation_required with an ask", asked.ErrorCode)
+	}
+
+	var nonce [32]byte
+	copy(nonce[:], common.FromHex(asked.Ask.AuthorizationNonce))
+	amount, _ := new(big.Int).SetString(asked.Ask.Amount, 10)
+	c := x402.Confirmation{MandateID: m.MandateID, AuthorizationNonce: nonce, Amount: amount, Resource: asked.Ask.Resource, ValidBefore: big.NewInt(1 << 40)}
+	csig, _ := x402.SignConfirmation(dk, c, chainID)
+	cj := c.ToJSON()
+	cj.Signature = "0x" + hex.EncodeToString(csig)
+	agent.Confirmation = &cj
+
+	confirmed, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed.StatusCode != http.StatusOK || !confirmed.Paid {
+		t.Fatalf("confirmed = %d paid=%v, want 200 paid", confirmed.StatusCode, confirmed.Paid)
+	}
+	if len(gw.Settlements) != 1 {
+		t.Errorf("settlements = %d, want 1", len(gw.Settlements))
+	}
+}
+
+// TestE2EDeferAgainstRealNode: a large payment settles but delivers only after
+// the confirm depth, and never delivers twice.
+func TestE2EDeferAgainstRealNode(t *testing.T) {
+	rpcURL := os.Getenv("E2E_RPC_URL")
+	if rpcURL == "" {
+		t.Skip("E2E_RPC_URL not set; skipping live-node end-to-end test")
+	}
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, rpcURL)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	dk, _ := crypto.GenerateKey()
+	delegator := crypto.PubkeyToAddress(dk.PublicKey)
+	mp := x402.NewMandatePolicy(chainID)
+	mp.DeferAbove = big.NewInt(500)
+	gw, server, agent, gatewayAddr := mandateGatewayFor(t, ctx, client, chainID, mp, 2)
+
+	m := x402.Mandate{
+		Delegator:           delegator,
+		Agent:               agent.Wallet.Address,
+		MaxAmountPerPayment: big.NewInt(500),
+		AllowedPayees:       []common.Address{gatewayAddr},
+		ValidAfter:          big.NewInt(0),
+		ValidBefore:         big.NewInt(1 << 40),
+		BudgetAmount:        big.NewInt(100_000),
+		MandateID:           [32]byte{0x22},
+	}
+	agent.Mandate = signMandateFor(t, dk, m, chainID)
+
+	first, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ErrorCode != x402.ErrCodePaymentDeferred {
+		t.Fatalf("first = %q, want payment_deferred", first.ErrorCode)
+	}
+	if len(gw.Settlements) != 1 {
+		t.Fatalf("settlements after defer = %d, want 1", len(gw.Settlements))
+	}
+
+	mineBlocks(t, ctx, client, chainID, 2)
+
+	delivered, err := agent.Retry(server.URL + "/premium/report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delivered.StatusCode != http.StatusOK || !delivered.Paid {
+		t.Fatalf("delivered = %d paid=%v, want 200 paid", delivered.StatusCode, delivered.Paid)
+	}
+	if again, _ := agent.Retry(server.URL + "/premium/report"); again.StatusCode == http.StatusOK {
+		t.Fatal("a delivered payment must not be delivered again")
 	}
 }

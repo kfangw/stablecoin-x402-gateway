@@ -42,6 +42,8 @@ type Agent struct {
 	Confirmation *ConfirmationJSON
 
 	lastPaymentHeader string
+	lastAmount        *big.Int
+	lastResource      string
 }
 
 // LastPaymentHeader returns the X-PAYMENT header value of the most recent
@@ -122,30 +124,46 @@ func (a *Agent) Get(url string) (*Result, error) {
 		return nil, err
 	}
 	a.lastPaymentHeader = header
+	a.lastAmount = amount
+	a.lastResource = url
+	return a.sendPayment(url, header, amount, &req)
+}
 
-	// Retry with the payment attached.
-	retry, err := http.NewRequest(http.MethodGet, url, nil)
+// Retry resends the most recent payment unchanged. It is how an agent follows up
+// a deferred payment: the same authorization, so the gateway recognizes the
+// in-flight settlement instead of treating it as a replay.
+func (a *Agent) Retry(url string) (*Result, error) {
+	if a.lastPaymentHeader == "" {
+		return nil, fmt.Errorf("x402 agent: no prior payment to retry")
+	}
+	return a.sendPayment(url, a.lastPaymentHeader, a.lastAmount, nil)
+}
+
+// sendPayment sends one request carrying the payment header and builds the
+// Result from the response.
+func (a *Agent) sendPayment(url, header string, amount *big.Int, req *PaymentRequirements) (*Result, error) {
+	paid, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	retry.Header.Set(HeaderPayment, header)
-	resp2, err := a.httpClient().Do(retry)
+	paid.Header.Set(HeaderPayment, header)
+	resp, err := a.httpClient().Do(paid)
 	if err != nil {
 		return nil, fmt.Errorf("x402 agent: paid request: %w", err)
 	}
-	body2, err := readBody(resp2)
+	body, err := readBody(resp)
 	if err != nil {
 		return nil, err
 	}
 
 	result := &Result{
-		StatusCode:  resp2.StatusCode,
-		Body:        body2,
-		Paid:        resp2.StatusCode < 400,
+		StatusCode:  resp.StatusCode,
+		Body:        body,
+		Paid:        resp.StatusCode < 400,
 		AmountPaid:  amount,
-		Requirement: &req,
+		Requirement: req,
 	}
-	if h := resp2.Header.Get(HeaderPaymentResponse); h != "" {
+	if h := resp.Header.Get(HeaderPaymentResponse); h != "" {
 		var s SettlementResponse
 		if err := DecodeHeader(h, &s); err == nil {
 			result.Settlement = &s
@@ -154,9 +172,9 @@ func (a *Agent) Get(url string) (*Result, error) {
 	// A 402 on the paid request carries a machine-readable code explaining the
 	// refusal (for example an unregistered agent, or a confirmation request);
 	// surface it on the result.
-	if resp2.StatusCode == http.StatusPaymentRequired {
+	if resp.StatusCode == http.StatusPaymentRequired {
 		var refused RequirementsResponse
-		if err := json.Unmarshal(body2, &refused); err == nil {
+		if err := json.Unmarshal(body, &refused); err == nil {
 			result.ErrorCode = refused.ErrorCode
 			result.Ask = refused.Ask
 		}
