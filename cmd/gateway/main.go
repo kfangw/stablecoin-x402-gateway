@@ -46,6 +46,7 @@ func run() error {
 	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint: local mode settlement, or read-only identity lookups in remote mode")
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
 	identityRegistry := fs.String("identity-registry", "", "identity registry address; when set, unregistered agents are rejected")
+	requireMandate := fs.Bool("require-mandate", false, "require a delegator-signed mandate with each payment")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
@@ -94,6 +95,14 @@ func run() error {
 		}
 		if stop != nil {
 			defer stop()
+		}
+	}
+
+	// Optional mandate policy: require a delegator-signed mandate with each
+	// payment. It stacks after any identity policy in the chain.
+	if *requireMandate {
+		if err := attachMandate(gw); err != nil {
+			return err
 		}
 	}
 
@@ -187,6 +196,35 @@ func attachIdentity(gw *x402.Gateway, client *ethclient.Client, registryAddr, rp
 	gw.Policy = x402.Chain{x402.AlwaysVerify{}, x402.IdentityPolicy{Registry: reg}}
 	log.Printf("identity policy on: registry %s", registryAddr)
 	return stop, nil
+}
+
+// attachMandate appends a mandate policy to the gateway's chain, so a payment
+// must carry a delegator-signed mandate scoped to its chain id.
+func attachMandate(gw *x402.Gateway) error {
+	chainID, err := chainIDFromNetwork(gw.Network)
+	if err != nil {
+		return err
+	}
+	base := x402.Chain{x402.AlwaysVerify{}}
+	if c, ok := gw.Policy.(x402.Chain); ok {
+		base = c
+	}
+	gw.Policy = append(base, x402.MandatePolicy{ChainID: chainID})
+	log.Printf("mandate policy on: chain id %s", chainID)
+	return nil
+}
+
+// chainIDFromNetwork parses the numeric chain id from an eip155:<id> network.
+func chainIDFromNetwork(network string) (*big.Int, error) {
+	_, id, ok := strings.Cut(network, ":")
+	if !ok {
+		return nil, fmt.Errorf("cannot read chain id from network %q", network)
+	}
+	chainID, ok := new(big.Int).SetString(id, 10)
+	if !ok {
+		return nil, fmt.Errorf("cannot read chain id from network %q", network)
+	}
+	return chainID, nil
 }
 
 // remoteGateway delegates to a facilitator and touches neither RPC nor a key.
