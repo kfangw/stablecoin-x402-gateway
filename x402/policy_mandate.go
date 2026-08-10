@@ -21,6 +21,11 @@ type MandatePolicy struct {
 	ChainID *big.Int
 	// Now returns the current time; nil defaults to time.Now. Tests inject it.
 	Now func() time.Time
+	// AskOnExceed turns a limit-type violation (per-payment cap, cumulative
+	// budget) into an ask for the delegator's confirmation instead of a
+	// rejection. Entitlement violations (signature, revocation, scope) are never
+	// asked. A valid confirmation bound to the payment promotes it to approval.
+	AskOnExceed bool
 	// accounts holds the cumulative and rate windows. It is nil for a
 	// scope-only policy and set by NewMandatePolicy; the gateway uses the
 	// constructor so accounting is on whenever mandates are required.
@@ -102,28 +107,79 @@ func (p MandatePolicy) Decide(_ context.Context, pc PaymentContext) Decision {
 	if !ok {
 		return rejectMandate(ErrCodeMandateInvalid, "payment amount is unreadable")
 	}
-	if m.MaxAmountPerPayment != nil && m.MaxAmountPerPayment.Sign() > 0 && amount.Cmp(m.MaxAmountPerPayment) > 0 {
-		return rejectMandate(ErrCodeMandateExceeded, "amount exceeds the per-payment limit")
+
+	// A confirmation, bound to this exact payment and signed by the delegator,
+	// lets a limit-type violation through. It never rescues an entitlement
+	// violation; all of those were checked above.
+	confirmed := p.confirmationApproves(pc, m, amount)
+
+	if m.MaxAmountPerPayment != nil && m.MaxAmountPerPayment.Sign() > 0 && amount.Cmp(m.MaxAmountPerPayment) > 0 && !confirmed {
+		return p.overLimit(ErrCodeMandateExceeded, "amount exceeds the per-payment limit")
 	}
 
 	// Cumulative and rate limits are stateful, so they run last. The reservation
 	// counts this payment against the windows immediately; the gateway confirms
 	// it on settlement success and drops it otherwise, so a rejected or failed
-	// payment never spends the budget.
+	// payment never spends the budget. A confirmation waives the budget check
+	// (but never the rate cap) while still recording the spend.
 	if p.accounts != nil {
 		nonce, ok := paymentNonce(pc)
 		if !ok {
 			return rejectMandate(ErrCodeMandateInvalid, "payment nonce is unreadable")
 		}
-		switch p.accounts.reserve(m, nonce, amount, p.now()) {
+		switch p.accounts.reserve(m, nonce, amount, p.now(), confirmed) {
 		case ErrCodeMandateBudget:
-			return rejectMandate(ErrCodeMandateBudget, "payment exceeds the mandate's cumulative budget")
+			return p.overLimit(ErrCodeMandateBudget, "payment exceeds the mandate's cumulative budget")
 		case ErrCodeMandateRate:
 			return rejectMandate(ErrCodeMandateRate, "payment exceeds the mandate's rate limit")
 		}
 	}
 
 	return Decision{Action: ActionApprove}
+}
+
+// overLimit turns a limit violation into an ask when AskOnExceed is set, and a
+// rejection otherwise.
+func (p MandatePolicy) overLimit(code, reason string) Decision {
+	if p.AskOnExceed {
+		return Decision{Action: ActionAsk, Code: ErrCodeConfirmationRequired, Reason: reason + "; confirm with the delegator"}
+	}
+	return rejectMandate(code, reason)
+}
+
+// confirmationApproves reports whether the payment carries a delegator-signed
+// confirmation bound to this exact payment (mandate, nonce, amount, resource)
+// and still valid.
+func (p MandatePolicy) confirmationApproves(pc PaymentContext, m Mandate, amount *big.Int) bool {
+	cj := pc.Payload.Confirmation
+	if cj == nil {
+		return false
+	}
+	c, err := cj.ToConfirmation()
+	if err != nil {
+		return false
+	}
+	signer, err := VerifyConfirmation(c, common.FromHex(cj.Signature), p.ChainID)
+	if err != nil || signer != m.Delegator {
+		return false
+	}
+	if c.MandateID != m.MandateID {
+		return false
+	}
+	nonce, ok := paymentNonce(pc)
+	if !ok || c.AuthorizationNonce != nonce {
+		return false
+	}
+	if c.Amount == nil || amount == nil || c.Amount.Cmp(amount) != 0 {
+		return false
+	}
+	if c.Resource != pc.Requirements.Resource {
+		return false
+	}
+	if c.ValidBefore == nil || p.now().Unix() >= c.ValidBefore.Int64() {
+		return false
+	}
+	return true
 }
 
 // Settled finalizes the reservation made in Decide: a successful settlement
@@ -253,7 +309,7 @@ type mandateSpend struct {
 // reserve counts a payment against the windows, including other reservations,
 // and records it if it fits. It returns an empty string on success or the error
 // code of the limit it would breach.
-func (a *mandateAccounts) reserve(m Mandate, nonce [32]byte, amount *big.Int, now time.Time) string {
+func (a *mandateAccounts) reserve(m Mandate, nonce [32]byte, amount *big.Int, now time.Time, skipBudget bool) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	acc := a.acct[m.MandateID]
@@ -261,7 +317,7 @@ func (a *mandateAccounts) reserve(m Mandate, nonce [32]byte, amount *big.Int, no
 		acc = &mandateAccount{reserved: make(map[[32]byte]mandateSpend)}
 		a.acct[m.MandateID] = acc
 	}
-	if m.BudgetAmount != nil && m.BudgetAmount.Sign() > 0 {
+	if !skipBudget && m.BudgetAmount != nil && m.BudgetAmount.Sign() > 0 {
 		used := acc.committedAmount(now, windowDur(m.BudgetWindowSeconds))
 		used.Add(used, acc.reservedAmount())
 		used.Add(used, amount)
