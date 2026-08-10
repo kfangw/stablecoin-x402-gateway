@@ -70,6 +70,9 @@ type PaymentPayload struct {
 	Network     string             `json:"network"`
 	Payload     ExactPayload       `json:"payload"`
 	Mandate     *SignedMandateJSON `json:"mandate,omitempty"`
+	// Confirmation, if present, is a delegator's signed approval of this one
+	// payment when it exceeds the mandate's limits (additive, like Mandate).
+	Confirmation *ConfirmationJSON `json:"confirmation,omitempty"`
 }
 
 // SettlementResponse is the settlement result carried in the
