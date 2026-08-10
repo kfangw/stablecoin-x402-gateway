@@ -29,8 +29,13 @@ type Agent struct {
 	DomainSeparator [32]byte
 
 	// MaxAmount is the spending limit delegated to the agent.
-	// The agent refuses payment terms that exceed it.
+	// The agent refuses payment terms that exceed it. When Grant is nil this
+	// value backs the default MaxAmountGrant policy.
 	MaxAmount *big.Int
+
+	// Grant decides whether to pay a set of terms. If nil, a MaxAmountGrant built
+	// from MaxAmount is used, so the agent's original behavior is unchanged.
+	Grant GrantPolicy
 
 	// Mandate, if set, is a delegator-signed grant attached to each payment so a
 	// gateway that requires mandates can check the agent's spending authority.
@@ -82,6 +87,15 @@ func (a *Agent) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
+// grant returns the configured grant policy, defaulting to a MaxAmountGrant
+// built from MaxAmount so the agent's original behavior is preserved.
+func (a *Agent) grant() GrantPolicy {
+	if a.Grant != nil {
+		return a.Grant
+	}
+	return MaxAmountGrant{Max: a.MaxAmount}
+}
+
 // Get requests a resource and, on a 402 response, pays and retries once.
 func (a *Agent) Get(url string) (*Result, error) {
 	resp, err := a.httpClient().Get(url)
@@ -113,10 +127,11 @@ func (a *Agent) Get(url string) (*Result, error) {
 	if !ok {
 		return nil, fmt.Errorf("x402 agent: invalid amount %q", req.MaxAmountRequired)
 	}
-	// Delegation limit: the minimal guard that keeps the agent from paying
-	// beyond its mandate.
-	if a.MaxAmount != nil && amount.Cmp(a.MaxAmount) > 0 {
-		return nil, fmt.Errorf("x402 agent: amount %s exceeds delegated limit %s", amount, a.MaxAmount)
+	// The grant policy decides whether to pay these terms. A refusal stops the
+	// agent; pay and ask both proceed to sign (an ask expects the agent to carry
+	// a confirmation, which it attaches if it has one).
+	if gd := a.grant().Decide(PaymentTermsContext{Requirements: req, Amount: amount}); gd.Action == GrantRefuse {
+		return nil, fmt.Errorf("x402 agent: %s", gd.Reason)
 	}
 
 	header, err := a.buildPayment(req, amount)
