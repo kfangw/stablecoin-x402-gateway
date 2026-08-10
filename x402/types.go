@@ -61,11 +61,15 @@ type ExactPayload struct {
 }
 
 // PaymentPayload is the full payload carried base64-encoded in the X-PAYMENT header.
+// Mandate is an additive field carrying a delegator-signed spending grant; like
+// ErrorCode it leaves the public x402 fields untouched, so wire compatibility
+// holds and the mandate moves atomically with the payment.
 type PaymentPayload struct {
-	X402Version int          `json:"x402Version"`
-	Scheme      string       `json:"scheme"`
-	Network     string       `json:"network"`
-	Payload     ExactPayload `json:"payload"`
+	X402Version int                `json:"x402Version"`
+	Scheme      string             `json:"scheme"`
+	Network     string             `json:"network"`
+	Payload     ExactPayload       `json:"payload"`
+	Mandate     *SignedMandateJSON `json:"mandate,omitempty"`
 }
 
 // SettlementResponse is the settlement result carried in the

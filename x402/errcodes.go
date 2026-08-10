@@ -16,6 +16,14 @@ const (
 	ErrCodePaymentDeferred      = "payment_deferred"       // ActionDefer: re-evaluation pending
 	ErrCodeConfirmationRequired = "confirmation_required"  // ActionAsk: delegator confirmation needed
 	ErrCodeBondRequired         = "bond_required"          // ActionRequireBond: a bond must be posted
+
+	ErrCodeMandateMissing  = "mandate_missing"         // a mandate is required but none was carried
+	ErrCodeMandateInvalid  = "mandate_invalid"         // bad signature, or payer is not the mandated agent
+	ErrCodeMandateExpired  = "mandate_expired"         // outside the mandate's validity window
+	ErrCodeMandateRevoked  = "mandate_revoked"         // the delegator revoked this mandate
+	ErrCodeMandateExceeded = "mandate_exceeded"        // amount, payee, or resource outside the mandate scope
+	ErrCodeMandateBudget   = "mandate_budget_exceeded" // cumulative window budget exceeded
+	ErrCodeMandateRate     = "mandate_rate_exceeded"   // window payment-frequency cap exceeded
 )
 
 // codeForAction returns the default error code for a non-approval action, used
