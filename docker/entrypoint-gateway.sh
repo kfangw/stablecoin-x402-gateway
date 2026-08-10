@@ -39,4 +39,8 @@ fi
 if [ -s "${REGISTRY_FILE}" ]; then
 	set -- "$@" --identity-registry "$(cat "${REGISTRY_FILE}")" --rpc "${RPC}"
 fi
+# Mandate policy: require a delegator-signed mandate with each payment.
+if [ -n "${REQUIRE_MANDATE:-}" ]; then
+	set -- "$@" --require-mandate
+fi
 exec gateway "$@"

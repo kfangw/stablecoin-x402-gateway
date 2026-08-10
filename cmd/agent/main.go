@@ -75,6 +75,7 @@ func runGet(args []string) error {
 	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
 	max := fs.Int64("max", 1000, "delegated spending limit in tKRW")
+	mandateFile := fs.String("mandate", "", "signed mandate file to attach to the payment")
 	fs.Parse(args)
 
 	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
@@ -108,6 +109,13 @@ func runGet(args []string) error {
 		Wallet:          wallet.FromKey(key),
 		DomainSeparator: domain,
 		MaxAmount:       big.NewInt(*max),
+	}
+	if *mandateFile != "" {
+		mandate, err := loadMandate(*mandateFile)
+		if err != nil {
+			return err
+		}
+		agent.Mandate = mandate
 	}
 	fmt.Printf("agent wallet %s, delegated limit %d tKRW\n", agent.Wallet.Address.Hex(), *max)
 
@@ -189,6 +197,19 @@ func agentKey() (*ecdsa.PrivateKey, error) {
 		return nil, fmt.Errorf("parse key from %s: %w", agentKeyEnv, err)
 	}
 	return key, nil
+}
+
+// loadMandate reads a signed mandate produced by the delegator command.
+func loadMandate(path string) (*x402.SignedMandateJSON, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read mandate: %w", err)
+	}
+	var m x402.SignedMandateJSON
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("parse mandate: %w", err)
+	}
+	return &m, nil
 }
 
 // errorField extracts the error message from a 402 requirements body,

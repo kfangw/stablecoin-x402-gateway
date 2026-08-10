@@ -98,19 +98,41 @@ services:
       PAYTO: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" # anvil account #3 (payment recipient)
       JOURNAL_PATH: /shared/settlements.jsonl
       KAFKA_BROKERS: redpanda:9092
+      REQUIRE_MANDATE: "1" # reject payments without a delegator-signed mandate
     entrypoint: ["entrypoint-gateway.sh"]
     ports:
       - "8402:8402"
     volumes:
       - shared:/shared
 
-  # Not started by `up` (demo profile); run it on demand to pay once.
+  # One-shot: the delegator signs a mandate for the agent and writes it to the
+  # shared volume. Run on demand as a dependency of the agent.
+  delegator:
+    image: stablecoin-x402-gateway:local
+    profiles: ["demo"]
+    depends_on:
+      anvil:
+        condition: service_healthy
+    environment:
+      RPC_URL: http://anvil:8545
+      DELEGATOR_KEY: "0x8b3a350cf5c34c9194ca85829a2df0ec3153be0318b5e2d3348e872092edffba" # anvil key #5
+      AGENT_ADDRESS: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC" # anvil account #2 (the mandated agent)
+      PAYTO: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" # anvil account #3 (the allowed payee)
+    entrypoint: ["entrypoint-delegator.sh"]
+    volumes:
+      - shared:/shared
+    restart: "no"
+
+  # Not started by `up` (demo profile); run it on demand to pay once. It
+  # registers, receives a mandate from the delegator, and pays under it.
   agent:
     image: stablecoin-x402-gateway:local
     profiles: ["demo"]
     depends_on:
       gateway:
         condition: service_started
+      delegator:
+        condition: service_completed_successfully
     environment:
       RPC_URL: http://anvil:8545
       AGENT_KEY: "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a" # anvil key #2

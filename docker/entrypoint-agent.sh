@@ -6,6 +6,7 @@ set -eu
 RPC="${RPC_URL:-http://anvil:8545}"
 ADDR_FILE="${TOKEN_ADDR_FILE:-/shared/token.addr}"
 REGISTRY_FILE="${REGISTRY_ADDR_FILE:-/shared/registry.addr}"
+MANDATE_FILE="${MANDATE_FILE:-/shared/mandate.json}"
 
 if [ ! -s "${ADDR_FILE}" ]; then
 	echo "agent: token address file ${ADDR_FILE} not found; is the stack up?" >&2
@@ -23,4 +24,10 @@ if [ -s "${REGISTRY_FILE}" ]; then
 	agent register --rpc "${RPC}" --registry "${REGISTRY}" --card "https://cards.example/demo-agent"
 fi
 
-exec agent get --rpc "${RPC}" --token "${TOKEN}" --max 1000 http://gateway:8402/premium/report
+# Attach the mandate if the delegator produced one, so a gateway that requires
+# mandates accepts the payment.
+set -- get --rpc "${RPC}" --token "${TOKEN}" --max 1000
+if [ -s "${MANDATE_FILE}" ]; then
+	set -- "$@" --mandate "${MANDATE_FILE}"
+fi
+exec agent "$@" http://gateway:8402/premium/report

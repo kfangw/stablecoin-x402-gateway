@@ -32,6 +32,10 @@ type Agent struct {
 	// The agent refuses payment terms that exceed it.
 	MaxAmount *big.Int
 
+	// Mandate, if set, is a delegator-signed grant attached to each payment so a
+	// gateway that requires mandates can check the agent's spending authority.
+	Mandate *SignedMandateJSON
+
 	lastPaymentHeader string
 }
 
@@ -177,6 +181,7 @@ func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, 
 		X402Version: Version,
 		Scheme:      SchemeExact,
 		Network:     req.Network,
+		Mandate:     a.Mandate,
 		Payload: ExactPayload{
 			Signature: "0x" + hex.EncodeToString(sig),
 			Authorization: AuthorizationJSON{

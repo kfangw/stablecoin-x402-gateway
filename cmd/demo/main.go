@@ -12,12 +12,14 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -216,8 +218,96 @@ func run() error {
 		return fmt.Errorf("replay must be rejected, got %d", resp.StatusCode)
 	}
 
-	fmt.Println("\ndemo complete: issue, identity rejection, register, 402, signed payment, on-chain settlement, reconciliation, replay rejection")
+	fmt.Println("\n== 9. Delegation: the gateway now also requires a signed mandate ==")
+	delegatorKey, _ := crypto.GenerateKey()
+	delegator := crypto.PubkeyToAddress(delegatorKey.PublicKey)
+	gw.Policy = x402.Chain{
+		x402.AlwaysVerify{},
+		x402.IdentityPolicy{Registry: reg},
+		x402.NewMandatePolicy(chainID),
+	}
+	goodMandate, err := signedMandate(delegatorKey, x402.Mandate{
+		Delegator:           delegator,
+		Agent:               agentWallet.Address,
+		MaxAmountPerPayment: big.NewInt(500),
+		AllowedPayees:       []common.Address{gatewayAddr},
+		ValidAfter:          big.NewInt(0),
+		ValidBefore:         big.NewInt(time.Now().Unix() + 3600),
+		BudgetAmount:        big.NewInt(100_000),
+		MandateID:           [32]byte{0x01},
+	}, chainID)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("   delegator %s signed mandate %s for the agent\n\n", delegator.Hex(), goodMandate.Mandate.MandateID)
+
+	fmt.Println("== 10. Agent pays under the mandate ==")
+	agent.Mandate = goodMandate
+	within, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("   HTTP %d, paid %s tKRW under the mandate\n\n", within.StatusCode, within.AmountPaid)
+	if within.StatusCode != http.StatusOK {
+		return fmt.Errorf("payment under the mandate should settle, got %d %q", within.StatusCode, within.ErrorCode)
+	}
+
+	fmt.Println("== 11. A payment beyond the mandate is refused ==")
+	tightMandate, err := signedMandate(delegatorKey, x402.Mandate{
+		Delegator:           delegator,
+		Agent:               agentWallet.Address,
+		MaxAmountPerPayment: big.NewInt(100), // below the 500 price
+		AllowedPayees:       []common.Address{gatewayAddr},
+		ValidAfter:          big.NewInt(0),
+		ValidBefore:         big.NewInt(time.Now().Unix() + 3600),
+		MandateID:           [32]byte{0x02},
+	}, chainID)
+	if err != nil {
+		return err
+	}
+	agent.Mandate = tightMandate
+	beyond, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("   HTTP %d, errorCode %q (500 tKRW over the 100 per-payment limit)\n\n", beyond.StatusCode, beyond.ErrorCode)
+	if beyond.ErrorCode != x402.ErrCodeMandateExceeded {
+		return fmt.Errorf("over-scope payment should be mandate_exceeded, got %q", beyond.ErrorCode)
+	}
+
+	fmt.Println("== 12. Revocation: the delegator withdraws the mandate ==")
+	revSig, err := x402.SignRevocation(delegatorKey, [32]byte{0x01}, chainID)
+	if err != nil {
+		return err
+	}
+	if err := gw.RevokeMandate(x402.RevocationJSON{
+		MandateID: goodMandate.Mandate.MandateID,
+		Signature: "0x" + hex.EncodeToString(revSig),
+	}); err != nil {
+		return err
+	}
+	agent.Mandate = goodMandate
+	revoked, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("   HTTP %d, errorCode %q (the mandate no longer authorizes payment)\n\n", revoked.StatusCode, revoked.ErrorCode)
+	if revoked.ErrorCode != x402.ErrCodeMandateRevoked {
+		return fmt.Errorf("payment under a revoked mandate should be mandate_revoked, got %q", revoked.ErrorCode)
+	}
+
+	fmt.Println("demo complete: identity, signed payment, settlement, reconciliation, replay rejection, and the mandate lifecycle (grant, pay, over-scope refusal, revoke)")
 	return nil
+}
+
+// signedMandate signs a mandate with the delegator's key and returns its wire
+// form, ready to attach to a payment.
+func signedMandate(key *ecdsa.PrivateKey, m x402.Mandate, chainID *big.Int) (*x402.SignedMandateJSON, error) {
+	sig, err := x402.SignMandate(key, m, chainID)
+	if err != nil {
+		return nil, err
+	}
+	return &x402.SignedMandateJSON{Mandate: m.ToJSON(), Signature: "0x" + hex.EncodeToString(sig)}, nil
 }
 
 // fundETH sends a small amount of ETH from the issuer to an address so it can
