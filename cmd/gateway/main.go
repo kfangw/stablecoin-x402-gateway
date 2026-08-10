@@ -48,6 +48,7 @@ func run() error {
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
 	identityRegistry := fs.String("identity-registry", "", "identity registry address; when set, unregistered agents are rejected")
 	requireMandate := fs.Bool("require-mandate", false, "require a delegator-signed mandate with each payment")
+	askOnExceed := fs.Bool("ask-on-exceed", false, "answer over-limit payments with confirmation_required instead of rejecting (requires --require-mandate)")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
@@ -102,9 +103,11 @@ func run() error {
 	// Optional mandate policy: require a delegator-signed mandate with each
 	// payment. It stacks after any identity policy in the chain.
 	if *requireMandate {
-		if err := attachMandate(gw); err != nil {
+		if err := attachMandate(gw, *askOnExceed); err != nil {
 			return err
 		}
+	} else if *askOnExceed {
+		return fmt.Errorf("--ask-on-exceed requires --require-mandate")
 	}
 
 	// Optional durability: journal every settlement before answering, and (if
@@ -226,7 +229,7 @@ func attachIdentity(gw *x402.Gateway, client *ethclient.Client, registryAddr, rp
 
 // attachMandate appends a mandate policy to the gateway's chain, so a payment
 // must carry a delegator-signed mandate scoped to its chain id.
-func attachMandate(gw *x402.Gateway) error {
+func attachMandate(gw *x402.Gateway, askOnExceed bool) error {
 	chainID, err := chainIDFromNetwork(gw.Network)
 	if err != nil {
 		return err
@@ -235,8 +238,10 @@ func attachMandate(gw *x402.Gateway) error {
 	if c, ok := gw.Policy.(x402.Chain); ok {
 		base = c
 	}
-	gw.Policy = append(base, x402.NewMandatePolicy(chainID))
-	log.Printf("mandate policy on: chain id %s", chainID)
+	mp := x402.NewMandatePolicy(chainID)
+	mp.AskOnExceed = askOnExceed
+	gw.Policy = append(base, mp)
+	log.Printf("mandate policy on: chain id %s, ask-on-exceed %v", chainID, askOnExceed)
 	return nil
 }
 

@@ -40,6 +40,8 @@ func main() {
 	switch sub {
 	case "sign":
 		err = runSign(args)
+	case "confirm":
+		err = runConfirm(args)
 	case "revoke":
 		err = runRevoke(args)
 	case "-h", "--help", "help":
@@ -61,6 +63,7 @@ func usage() {
 
 commands:
   sign      sign a mandate granting an agent bounded spending authority
+  confirm   sign a confirmation approving one over-limit payment
   revoke    revoke a mandate by signing its id and posting to the gateway
 
 the delegator key is read from the `+delegatorKeyEnv+` environment variable.
@@ -137,6 +140,74 @@ func runSign(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "signed mandate %s for agent %s (delegator %s)\n",
 		signed.Mandate.MandateID, signed.Mandate.Agent, delegator.Hex())
+	return nil
+}
+
+// runConfirm reads an ask request produced by the agent and signs a
+// confirmation approving that one over-limit payment.
+func runConfirm(args []string) error {
+	fs := flag.NewFlagSet("confirm", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint (read-only, for the chain id)")
+	askFile := fs.String("ask", "", "ask request file from the agent (required)")
+	validFor := fs.Int64("valid-for", 600, "seconds the confirmation stays valid from now")
+	out := fs.String("out", "", "write the signed confirmation here (default: stdout)")
+	fs.Parse(args)
+
+	if *askFile == "" {
+		return fmt.Errorf("--ask is required")
+	}
+	raw, err := os.ReadFile(*askFile)
+	if err != nil {
+		return fmt.Errorf("read ask: %w", err)
+	}
+	var ask x402.AskRequest
+	if err := json.Unmarshal(raw, &ask); err != nil {
+		return fmt.Errorf("parse ask: %w", err)
+	}
+	mandateID, err := bytes32(ask.MandateID)
+	if err != nil {
+		return fmt.Errorf("ask mandate id: %w", err)
+	}
+	nonce, err := bytes32(ask.AuthorizationNonce)
+	if err != nil {
+		return fmt.Errorf("ask nonce: %w", err)
+	}
+	amount, ok := new(big.Int).SetString(ask.Amount, 10)
+	if !ok {
+		return fmt.Errorf("ask amount %q is not an integer", ask.Amount)
+	}
+
+	key, _, err := delegatorKey()
+	if err != nil {
+		return err
+	}
+	cid, err := chainID(*rpc)
+	if err != nil {
+		return err
+	}
+	c := x402.Confirmation{
+		MandateID:          mandateID,
+		AuthorizationNonce: nonce,
+		Amount:             amount,
+		Resource:           ask.Resource,
+		ValidBefore:        big.NewInt(time.Now().Unix() + *validFor),
+	}
+	sig, err := x402.SignConfirmation(key, c, cid)
+	if err != nil {
+		return err
+	}
+	cj := c.ToJSON()
+	cj.Signature = "0x" + hex.EncodeToString(sig)
+	body, err := json.MarshalIndent(cj, "", "  ")
+	if err != nil {
+		return err
+	}
+	if *out == "" {
+		fmt.Println(string(body))
+	} else if err := os.WriteFile(*out, body, 0o644); err != nil {
+		return fmt.Errorf("write confirmation: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "signed a confirmation for payment %s (amount %s)\n", ask.AuthorizationNonce, ask.Amount)
 	return nil
 }
 

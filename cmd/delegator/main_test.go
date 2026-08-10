@@ -22,6 +22,12 @@ func TestSignArgValidation(t *testing.T) {
 	}
 }
 
+func TestConfirmArgValidation(t *testing.T) {
+	if err := runConfirm(nil); err == nil {
+		t.Fatal("runConfirm without --ask should error")
+	}
+}
+
 func TestRevokeArgValidation(t *testing.T) {
 	cases := []struct {
 		name string

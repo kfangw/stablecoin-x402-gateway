@@ -42,6 +42,18 @@ type RequirementsResponse struct {
 	Error       string                `json:"error"`
 	ErrorCode   string                `json:"errorCode,omitempty"`
 	Accepts     []PaymentRequirements `json:"accepts"`
+	// Ask is present only on a confirmation_required response: it names the exact
+	// payment the delegator must confirm.
+	Ask *AskRequest `json:"ask,omitempty"`
+}
+
+// AskRequest describes the one payment a delegator is asked to confirm. The
+// agent hands these fields to the delegator, who signs a matching Confirmation.
+type AskRequest struct {
+	MandateID          string `json:"mandateId"`
+	AuthorizationNonce string `json:"authorizationNonce"`
+	Amount             string `json:"amount"`
+	Resource           string `json:"resource"`
 }
 
 // AuthorizationJSON is the wire representation of the EIP-3009 authorization.

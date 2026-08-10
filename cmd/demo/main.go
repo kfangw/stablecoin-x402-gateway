@@ -221,10 +221,12 @@ func run() error {
 	fmt.Println("\n== 9. Delegation: the gateway now also requires a signed mandate ==")
 	delegatorKey, _ := crypto.GenerateKey()
 	delegator := crypto.PubkeyToAddress(delegatorKey.PublicKey)
+	mandatePolicy := x402.NewMandatePolicy(chainID)
+	mandatePolicy.AskOnExceed = true // over-limit payments ask instead of failing
 	gw.Policy = x402.Chain{
 		x402.AlwaysVerify{},
 		x402.IdentityPolicy{Registry: reg},
-		x402.NewMandatePolicy(chainID),
+		mandatePolicy,
 	}
 	goodMandate, err := signedMandate(delegatorKey, x402.Mandate{
 		Delegator:           delegator,
@@ -252,7 +254,8 @@ func run() error {
 		return fmt.Errorf("payment under the mandate should settle, got %d %q", within.StatusCode, within.ErrorCode)
 	}
 
-	fmt.Println("== 11. A payment beyond the mandate is refused ==")
+	fmt.Println("== 11. A payment beyond the mandate asks the delegator ==")
+	tightID := [32]byte{0x02}
 	tightMandate, err := signedMandate(delegatorKey, x402.Mandate{
 		Delegator:           delegator,
 		Agent:               agentWallet.Address,
@@ -260,19 +263,44 @@ func run() error {
 		AllowedPayees:       []common.Address{gatewayAddr},
 		ValidAfter:          big.NewInt(0),
 		ValidBefore:         big.NewInt(time.Now().Unix() + 3600),
-		MandateID:           [32]byte{0x02},
+		MandateID:           tightID,
 	}, chainID)
 	if err != nil {
 		return err
 	}
 	agent.Mandate = tightMandate
-	beyond, err := agent.Get(server.URL + "/premium/report")
+	agent.Confirmation = nil
+	asked, err := agent.Get(server.URL + "/premium/report")
 	if err != nil {
 		return err
 	}
-	fmt.Printf("   HTTP %d, errorCode %q (500 tKRW over the 100 per-payment limit)\n\n", beyond.StatusCode, beyond.ErrorCode)
-	if beyond.ErrorCode != x402.ErrCodeMandateExceeded {
-		return fmt.Errorf("over-scope payment should be mandate_exceeded, got %q", beyond.ErrorCode)
+	fmt.Printf("   HTTP %d, errorCode %q (500 tKRW over the 100 per-payment limit)\n", asked.StatusCode, asked.ErrorCode)
+	if asked.ErrorCode != x402.ErrCodeConfirmationRequired || asked.Ask == nil {
+		return fmt.Errorf("over-limit payment should be confirmation_required, got %q", asked.ErrorCode)
+	}
+
+	// The delegator confirms this one payment, bound to its authorization nonce.
+	var nonce [32]byte
+	copy(nonce[:], common.FromHex(asked.Ask.AuthorizationNonce))
+	amount, _ := new(big.Int).SetString(asked.Ask.Amount, 10)
+	conf, err := signConfirmation(delegatorKey, x402.Confirmation{
+		MandateID:          tightID,
+		AuthorizationNonce: nonce,
+		Amount:             amount,
+		Resource:           asked.Ask.Resource,
+		ValidBefore:        big.NewInt(time.Now().Unix() + 600),
+	}, chainID)
+	if err != nil {
+		return err
+	}
+	agent.Confirmation = conf
+	confirmed, err := agent.Get(server.URL + "/premium/report")
+	if err != nil {
+		return err
+	}
+	fmt.Printf("   after the delegator confirmed: HTTP %d, paid %s tKRW\n\n", confirmed.StatusCode, confirmed.AmountPaid)
+	if confirmed.StatusCode != http.StatusOK {
+		return fmt.Errorf("confirmed payment should settle, got %d %q", confirmed.StatusCode, confirmed.ErrorCode)
 	}
 
 	fmt.Println("== 12. Revocation: the delegator withdraws the mandate ==")
@@ -287,6 +315,7 @@ func run() error {
 		return err
 	}
 	agent.Mandate = goodMandate
+	agent.Confirmation = nil
 	revoked, err := agent.Get(server.URL + "/premium/report")
 	if err != nil {
 		return err
@@ -296,8 +325,20 @@ func run() error {
 		return fmt.Errorf("payment under a revoked mandate should be mandate_revoked, got %q", revoked.ErrorCode)
 	}
 
-	fmt.Println("demo complete: identity, signed payment, settlement, reconciliation, replay rejection, and the mandate lifecycle (grant, pay, over-scope refusal, revoke)")
+	fmt.Println("demo complete: identity, signed payment, settlement, reconciliation, replay rejection, and the mandate lifecycle (grant, pay, ask and confirm, revoke)")
 	return nil
+}
+
+// signConfirmation signs a confirmation with the delegator's key and returns its
+// wire form.
+func signConfirmation(key *ecdsa.PrivateKey, c x402.Confirmation, chainID *big.Int) (*x402.ConfirmationJSON, error) {
+	sig, err := x402.SignConfirmation(key, c, chainID)
+	if err != nil {
+		return nil, err
+	}
+	cj := c.ToJSON()
+	cj.Signature = "0x" + hex.EncodeToString(sig)
+	return &cj, nil
 }
 
 // signedMandate signs a mandate with the delegator's key and returns its wire

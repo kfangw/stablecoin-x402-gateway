@@ -124,13 +124,13 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 
 		header := r.Header.Get(HeaderPayment)
 		if header == "" {
-			g.writeRequirements(w, resource, ErrCodePaymentRequired, "X-PAYMENT header is required")
+			g.writeRequirements(w, resource, &failure{Code: ErrCodePaymentRequired, Reason: "X-PAYMENT header is required"})
 			return
 		}
 
 		record, fail := g.verifyAndSettle(r.Context(), header, g.Requirements(resource))
 		if fail != nil {
-			g.writeRequirements(w, resource, fail.Code, fail.Reason)
+			g.writeRequirements(w, resource, fail)
 			return
 		}
 
@@ -147,23 +147,26 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-func (g *Gateway) writeRequirements(w http.ResponseWriter, resource, code, msg string) {
+func (g *Gateway) writeRequirements(w http.ResponseWriter, resource string, fail *failure) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusPaymentRequired)
 	body, _ := json.Marshal(RequirementsResponse{
 		X402Version: Version,
-		Error:       msg,
-		ErrorCode:   code,
+		Error:       fail.Reason,
+		ErrorCode:   fail.Code,
 		Accepts:     []PaymentRequirements{g.Requirements(resource)},
+		Ask:         fail.Ask,
 	})
 	_, _ = w.Write(body)
 }
 
 // failure is a non-approval outcome: the machine-readable code served as
-// errorCode and the human-readable reason served as error.
+// errorCode and the human-readable reason served as error. Ask is set only on a
+// confirmation_required outcome.
 type failure struct {
 	Code   string
 	Reason string
+	Ask    *AskRequest
 }
 
 // verifyAndSettle runs the payment through the facilitator (verify, then
@@ -172,14 +175,14 @@ type failure struct {
 func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs PaymentRequirements) (SettlementRecord, *failure) {
 	var p PaymentPayload
 	if err := DecodeHeader(header, &p); err != nil {
-		return SettlementRecord{}, &failure{ErrCodeInvalidHeader, fmt.Sprintf("invalid X-PAYMENT header: %v", err)}
+		return SettlementRecord{}, &failure{Code: ErrCodeInvalidHeader, Reason: fmt.Sprintf("invalid X-PAYMENT header: %v", err)}
 	}
 
 	fac := g.facilitator()
 
 	vr, err := fac.Verify(ctx, p, reqs)
 	if err != nil {
-		return SettlementRecord{}, &failure{ErrCodeVerificationError, fmt.Sprintf("verification error: %v", err)}
+		return SettlementRecord{}, &failure{Code: ErrCodeVerificationError, Reason: fmt.Sprintf("verification error: %v", err)}
 	}
 
 	// The accept decision is a swappable policy, evaluated before settlement.
@@ -200,7 +203,11 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 				reason = vr.InvalidReason
 			}
 		}
-		return SettlementRecord{}, &failure{code, reason}
+		f := &failure{Code: code, Reason: reason}
+		if d.Action == ActionAsk {
+			f.Ask = askFromContext(pc)
+		}
+		return SettlementRecord{}, f
 	}
 
 	// The policy approved, so any reservation it made must be finalized: notify
@@ -215,7 +222,7 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	sr, err := fac.Settle(ctx, p, reqs)
 	if err != nil {
 		notify(false)
-		return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("settlement error: %v", err)}
+		return SettlementRecord{}, &failure{Code: ErrCodeSettlementError, Reason: fmt.Sprintf("settlement error: %v", err)}
 	}
 	if sr == nil || !sr.Success {
 		notify(false)
@@ -223,14 +230,14 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 		if sr != nil && sr.ErrorReason != "" {
 			reason = sr.ErrorReason
 		}
-		return SettlementRecord{}, &failure{ErrCodeSettlementFailed, reason}
+		return SettlementRecord{}, &failure{Code: ErrCodeSettlementFailed, Reason: reason}
 	}
 
 	// Reconstruct the record from the (already validated) payload and receipt.
 	auth, _, err := parseExactPayload(p.Payload)
 	if err != nil {
 		notify(false)
-		return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("record settlement: %v", err)}
+		return SettlementRecord{}, &failure{Code: ErrCodeSettlementError, Reason: fmt.Sprintf("record settlement: %v", err)}
 	}
 	record := SettlementRecord{
 		Payer:  auth.From,
@@ -244,7 +251,7 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	if g.Journal != nil {
 		if err := g.Journal.Append(g.journalEntry(record)); err != nil {
 			notify(false)
-			return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("journal settlement: %v", err)}
+			return SettlementRecord{}, &failure{Code: ErrCodeSettlementError, Reason: fmt.Sprintf("journal settlement: %v", err)}
 		}
 	}
 	notify(true)
@@ -252,6 +259,20 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	g.Settlements = append(g.Settlements, record)
 	g.mu.Unlock()
 	return record, nil
+}
+
+// askFromContext names the payment a confirmation must be signed for.
+func askFromContext(pc PaymentContext) *AskRequest {
+	mandateID := ""
+	if pc.Payload.Mandate != nil {
+		mandateID = pc.Payload.Mandate.Mandate.MandateID
+	}
+	return &AskRequest{
+		MandateID:          mandateID,
+		AuthorizationNonce: pc.Payload.Payload.Authorization.Nonce,
+		Amount:             pc.Payload.Payload.Authorization.Value,
+		Resource:           pc.Requirements.Resource,
+	}
 }
 
 // RevokeMandate verifies a delegator's signed revocation and records it, so the

@@ -76,6 +76,7 @@ func runGet(args []string) error {
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
 	max := fs.Int64("max", 1000, "delegated spending limit in tKRW")
 	mandateFile := fs.String("mandate", "", "signed mandate file to attach to the payment")
+	confirmationFile := fs.String("confirmation", "", "signed confirmation file to attach when retrying an over-limit payment")
 	fs.Parse(args)
 
 	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
@@ -117,6 +118,13 @@ func runGet(args []string) error {
 		}
 		agent.Mandate = mandate
 	}
+	if *confirmationFile != "" {
+		confirmation, err := loadConfirmation(*confirmationFile)
+		if err != nil {
+			return err
+		}
+		agent.Confirmation = confirmation
+	}
 	fmt.Printf("agent wallet %s, delegated limit %d tKRW\n", agent.Wallet.Address.Hex(), *max)
 
 	result, err := agent.Get(url)
@@ -126,6 +134,15 @@ func runGet(args []string) error {
 
 	fmt.Printf("HTTP %d\n", result.StatusCode)
 	if !result.Paid {
+		// A confirmation request is not a plain rejection: print the ask as JSON
+		// on stdout so it can be handed to `delegator confirm`, and exit with a
+		// distinct code.
+		if result.ErrorCode == x402.ErrCodeConfirmationRequired && result.Ask != nil {
+			ask, _ := json.MarshalIndent(result.Ask, "", "  ")
+			fmt.Println(string(ask))
+			fmt.Fprintln(os.Stderr, "confirmation required: sign this with `delegator confirm --ask <file>`, then retry with `agent get --confirmation <file>`")
+			os.Exit(2)
+		}
 		// The retry still returned 402: surface the machine error field, and
 		// point at registration when that is the reason.
 		fmt.Fprintf(os.Stderr, "payment rejected: %s\n", errorField(result.Body))
@@ -210,6 +227,19 @@ func loadMandate(path string) (*x402.SignedMandateJSON, error) {
 		return nil, fmt.Errorf("parse mandate: %w", err)
 	}
 	return &m, nil
+}
+
+// loadConfirmation reads a signed confirmation produced by `delegator confirm`.
+func loadConfirmation(path string) (*x402.ConfirmationJSON, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read confirmation: %w", err)
+	}
+	var c x402.ConfirmationJSON
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, fmt.Errorf("parse confirmation: %w", err)
+	}
+	return &c, nil
 }
 
 // errorField extracts the error message from a 402 requirements body,

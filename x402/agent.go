@@ -36,6 +36,11 @@ type Agent struct {
 	// gateway that requires mandates can check the agent's spending authority.
 	Mandate *SignedMandateJSON
 
+	// Confirmation, if set, is a delegator's approval of one over-limit payment.
+	// The agent reuses the confirmation's authorization nonce so the resigned
+	// payment matches what the delegator confirmed.
+	Confirmation *ConfirmationJSON
+
 	lastPaymentHeader string
 }
 
@@ -56,6 +61,9 @@ type Result struct {
 	// was an unregistered-agent rejection, which a caller can act on by
 	// registering the agent and retrying.
 	ErrorCode string
+	// Ask is set when ErrorCode is confirmation_required: it names the payment
+	// the delegator must confirm before a retry can settle.
+	Ask *AskRequest
 }
 
 // RegistrationHint reports whether the paid request was refused because the
@@ -144,11 +152,13 @@ func (a *Agent) Get(url string) (*Result, error) {
 		}
 	}
 	// A 402 on the paid request carries a machine-readable code explaining the
-	// refusal (for example an unregistered agent); surface it on the result.
+	// refusal (for example an unregistered agent, or a confirmation request);
+	// surface it on the result.
 	if resp2.StatusCode == http.StatusPaymentRequired {
 		var refused RequirementsResponse
 		if err := json.Unmarshal(body2, &refused); err == nil {
 			result.ErrorCode = refused.ErrorCode
+			result.Ask = refused.Ask
 		}
 	}
 	return result, nil
@@ -157,7 +167,7 @@ func (a *Agent) Get(url string) (*Result, error) {
 // buildPayment builds an EIP-3009 authorization matching the payment terms,
 // signs it, and encodes it as a header value.
 func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, error) {
-	nonce, err := wallet.NewNonce()
+	nonce, err := a.paymentNonce()
 	if err != nil {
 		return "", err
 	}
@@ -178,10 +188,11 @@ func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, 
 		return "", err
 	}
 	return EncodeHeader(PaymentPayload{
-		X402Version: Version,
-		Scheme:      SchemeExact,
-		Network:     req.Network,
-		Mandate:     a.Mandate,
+		X402Version:  Version,
+		Scheme:       SchemeExact,
+		Network:      req.Network,
+		Mandate:      a.Mandate,
+		Confirmation: a.Confirmation,
 		Payload: ExactPayload{
 			Signature: "0x" + hex.EncodeToString(sig),
 			Authorization: AuthorizationJSON{
@@ -194,6 +205,22 @@ func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, 
 			},
 		},
 	})
+}
+
+// paymentNonce returns a fresh random nonce, unless a confirmation is attached,
+// in which case it reuses the confirmed authorization nonce so the resigned
+// payment is the one the delegator approved.
+func (a *Agent) paymentNonce() ([32]byte, error) {
+	if a.Confirmation != nil {
+		b := common.FromHex(a.Confirmation.AuthorizationNonce)
+		if len(b) != 32 {
+			return [32]byte{}, fmt.Errorf("x402 agent: confirmation nonce is not 32 bytes")
+		}
+		var n [32]byte
+		copy(n[:], b)
+		return n, nil
+	}
+	return wallet.NewNonce()
 }
 
 func readBody(resp *http.Response) ([]byte, error) {
