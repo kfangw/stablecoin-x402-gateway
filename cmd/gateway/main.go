@@ -209,7 +209,7 @@ func attachMandate(gw *x402.Gateway) error {
 	if c, ok := gw.Policy.(x402.Chain); ok {
 		base = c
 	}
-	gw.Policy = append(base, x402.MandatePolicy{ChainID: chainID})
+	gw.Policy = append(base, x402.NewMandatePolicy(chainID))
 	log.Printf("mandate policy on: chain id %s", chainID)
 	return nil
 }

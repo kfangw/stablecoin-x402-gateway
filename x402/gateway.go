@@ -203,11 +203,22 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 		return SettlementRecord{}, &failure{code, reason}
 	}
 
+	// The policy approved, so any reservation it made must be finalized: notify
+	// settlers with the outcome of every path from here on.
+	settlers := g.settlers()
+	notify := func(ok bool) {
+		for _, s := range settlers {
+			s.Settled(pc, ok)
+		}
+	}
+
 	sr, err := fac.Settle(ctx, p, reqs)
 	if err != nil {
+		notify(false)
 		return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("settlement error: %v", err)}
 	}
 	if sr == nil || !sr.Success {
+		notify(false)
 		reason := "settlement failed"
 		if sr != nil && sr.ErrorReason != "" {
 			reason = sr.ErrorReason
@@ -218,6 +229,7 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	// Reconstruct the record from the (already validated) payload and receipt.
 	auth, _, err := parseExactPayload(p.Payload)
 	if err != nil {
+		notify(false)
 		return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("record settlement: %v", err)}
 	}
 	record := SettlementRecord{
@@ -231,13 +243,33 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	// source of truth; the in-memory slice mirrors it for callers that read it.
 	if g.Journal != nil {
 		if err := g.Journal.Append(g.journalEntry(record)); err != nil {
+			notify(false)
 			return SettlementRecord{}, &failure{ErrCodeSettlementError, fmt.Sprintf("journal settlement: %v", err)}
 		}
 	}
+	notify(true)
 	g.mu.Lock()
 	g.Settlements = append(g.Settlements, record)
 	g.mu.Unlock()
 	return record, nil
+}
+
+// settlers returns the policies in the active chain that observe settlement.
+func (g *Gateway) settlers() []PaymentSettler {
+	var out []PaymentSettler
+	switch p := g.policy().(type) {
+	case Chain:
+		for _, e := range p {
+			if s, ok := e.(PaymentSettler); ok {
+				out = append(out, s)
+			}
+		}
+	default:
+		if s, ok := p.(PaymentSettler); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // journalEntry projects a settlement record into its durable journal form.

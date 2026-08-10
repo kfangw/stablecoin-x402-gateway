@@ -43,6 +43,14 @@ type Policy interface {
 	Decide(ctx context.Context, pc PaymentContext) Decision
 }
 
+// PaymentSettler is an optional interface a policy may implement to learn a
+// payment's settlement outcome, so it can finalize state it reserved during
+// Decide. The gateway calls Settled once per approved payment, with success
+// true only when settlement completed.
+type PaymentSettler interface {
+	Settled(pc PaymentContext, success bool)
+}
+
 // Chain evaluates its policies in order and returns the first decision that is
 // not an approval, so any policy can veto a payment. An empty chain approves.
 // In practice a chain starts with AlwaysVerify and stacks further checks after
