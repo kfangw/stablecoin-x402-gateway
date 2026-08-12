@@ -158,6 +158,12 @@ func (t *Token) Transfer(opts *bind.TransactOpts, to common.Address, value *big.
 	return t.bound.Transact(opts, "transfer", to, value)
 }
 
+// Approve sets the spender's allowance over the caller's tKRW, so a contract
+// such as the delegated-spend deposit can pull it with transferFrom.
+func (t *Token) Approve(opts *bind.TransactOpts, spender common.Address, value *big.Int) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "approve", spender, value)
+}
+
 // SetFrozen freezes or unfreezes an account. Issuer only.
 func (t *Token) SetFrozen(opts *bind.TransactOpts, account common.Address, value bool) (*types.Transaction, error) {
 	return t.bound.Transact(opts, "setFrozen", account, value)
