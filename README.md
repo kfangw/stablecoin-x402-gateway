@@ -110,19 +110,23 @@ keys are the publicly known anvil development accounts and hold no real funds.
 ## Layout
 
 ```
-contracts/         KRWTestStablecoin.sol + IdentityRegistry.sol (ERC-8004-style agent registry)
-token/             contract deployment and calls (ABI and bytecode embedded)
+contracts/         KRWTestStablecoin.sol, IdentityRegistry.sol, RWATestAsset.sol, EligibilityRegistry.sol, DvPSettlement.sol, DelegatedSpend.sol
+token/             tKRW deployment and calls, including freeze and allowlist controls (ABI and bytecode embedded)
 registry/          identity registry deployment and calls (ABI and bytecode embedded)
+asset/             RWA asset (tRWA) deployment and calls, the asset delivered after settlement
+eligibility/       recipient-eligibility registry deployment and calls, with delegator-to-agent inheritance
+dvp/               delivery-versus-payment settlement contract deployment and calls
+spend/             delegated spending contract deployment and calls, the on-chain mandate enforcer
 wallet/            key management and EIP-712 signing (TransferWithAuthorization)
-ledger/            issuance ledger indexed from Transfer events, reconciled against the chain
-x402/              the payment protocol: gateway (server), facilitator (verify/settle, local or remote), agent (client), and accept policies
+ledger/            token ledger indexed from Transfer events, reconciled against the chain (tKRW issuance and tRWA holdings)
+x402/              the payment protocol: gateway (server), facilitator (verify/settle, local or remote), agent (client), accept policies, delivery, refunds, and sessions
 internal/nodeutil/ RPC dial and env-key transactor helpers shared by the binaries
 cmd/demo/          one-command demo of the whole flow on the simulated backend
-cmd/issuer/        issuer CLI: deploy, deploy-registry, mint, reconcile against a real node
-cmd/gateway/       standalone x402 gateway server (built-in or remote facilitator)
-cmd/facilitator/   facilitator HTTP service: verify, settle, supported
-cmd/agent/         paying agent CLI: get (pay for a resource), register (join the identity registry)
-cmd/delegator/     delegation CLI: sign (issue a mandate), confirm (approve an over-limit payment), revoke (withdraw one)
+cmd/issuer/        issuer CLI: deploy, deploy-registry, mint, reconcile (--asset for the holdings ledger) against a real node
+cmd/gateway/       standalone x402 gateway server (built-in or remote facilitator); flags for eligibility, delivery, DvP, sessions, discovery
+cmd/facilitator/   facilitator HTTP service: verify, settle (optionally through DvP), supported
+cmd/agent/         paying agent CLI: get (pay for a resource, or run a session), discover (list resources), register (join the identity registry)
+cmd/delegator/     delegation CLI: sign, confirm, revoke (off-chain), plus deposit, mandate-onchain, revoke-onchain (on-chain enforcement)
 sim/               in-process policy lab: seeded workload, attack catalog, delegator responder, and metrics
 cmd/sim/           runs the policy lab and compares policy combinations over the same traffic
 ```
@@ -144,6 +148,10 @@ The notes group into three: how a payment is decided and settled, how the pieces
 **The accept decision is a policy.** Deployed payment systems differ in their accept rules: some approve optimistically before finality, some verify every payment, some release only after settlement. The gateway makes this rule an explicit, swappable component instead of hard-coded control flow; the default `AlwaysVerify` policy reproduces the original behavior, approving exactly when verification passed. The policy runs before settlement and only decides, so rejecting a payment stops it short of any on-chain transaction. This mirrors how x402 V2 exposes the release decision as a lifecycle hook. A `Decision` carries one of five actions (approve, reject, defer, ask, require-bond) with a machine-readable error code, and a `Chain` evaluates policies in order and returns the first non-approval, so identity, mandate, and verification checks stack without any of them knowing about the others. Only approve settles; every other action becomes a 402 with its own `errorCode`. Full note: [docs/design/gateway.md](docs/design/gateway.md).
 
 **Agent identity.** The gateway can require the paying agent to be registered before it settles. `IdentityRegistry.sol` is a minimal, ERC-8004-style registry that maps an agent address to a registration flag and an agent-card URL; agents self-register with `msg.sender`, matching the registration model of the deployed registries this stands in for. An `IdentityPolicy` stacks after `AlwaysVerify` in the chain, resolves the payer from the verification result, and rejects an unregistered agent with `errorCode: identity_unregistered`; a registry lookup that errors fails closed. The lookup is read-only, so a remote-mode gateway that holds no settlement key gains only a read-only RPC connection for it. The payer never submits a transaction on the payment path (that is the point of the EIP-3009 authorization); registration is a separate, one-time setup transaction the agent sends itself with `agent register`. Enable the check with `--identity-registry <address>`. Full notes: [docs/design/gateway.md](docs/design/gateway.md) and [docs/design/contracts.md](docs/design/contracts.md).
+
+**Asset delivery.** After settlement the gateway can deliver a mock RWA token (`RWATestAsset.sol`, tRWA) to the payer, in one of two modes. The two-transaction flow settles the payment and then transfers the asset as a separate transaction; a delivery failure after settlement is not a silent loss, but a recorded refund of the payment where the gateway holds a key, or an outstanding `refund_pending` journal entry on a keyless gateway. The atomic delivery-versus-payment flow (`DvPSettlement.sol`) instead runs the payment (EIP-3009 to the seller) and the delivery (the seller's asset to the buyer) in one `settleAndDeliver` transaction, so they succeed or revert together. Recipient eligibility, in the spirit of ERC-3643, is checked before settlement (`EligibilityRegistry.sol`, `errorCode: payer_not_eligible`), so an ineligible buyer is stopped before a payment that delivery would only bounce; an agent can inherit eligibility from its delegator, resolved dynamically so revoking the delegator's eligibility removes the agent's at once. The tKRW contract carries issuer freeze and an opt-in transfer allowlist for regulatory control, and a frozen payer is reported at verify rather than on chain. The asset holdings ledger reconciles against the chain exactly like the issuance ledger. Enable with `--asset` (two-transaction), `--dvp` (atomic), and `--eligibility-registry`. Full notes: [docs/design/contracts.md](docs/design/contracts.md) and [docs/design/gateway.md](docs/design/gateway.md).
+
+**On-chain mandates, sessions, and discovery.** The same mandate terms the gateway checks off chain can be enforced on chain: `DelegatedSpend.sol` holds a delegator's deposit and lets the agent spend within a per-payment cap, validity window, payee allowlist, and cumulative budget, checked cheapest-first in the same order as the gateway policy. A parity test runs a shared case table through both enforcers and asserts they agree; the one intended difference, a fixed on-chain budget window versus the gateway's sliding one, is documented as a separated case. Payment sessions let one signed authorization cover many requests: the gateway meters each request against the budget and settles the whole authorization at close (or when it is spent, or the authorization nears expiry), refunding the unused remainder, so a session needs the refund path (`--sessions`). An unauthenticated `GET /resources` lists the gateway's paid resources in the public x402 discovery shape, which `agent discover` consumes. Full notes: [docs/design/contracts.md](docs/design/contracts.md) and [docs/design/gateway.md](docs/design/gateway.md).
 
 **The agent's delegation limit.** The agent refuses payment terms above its delegated limit (MaxAmount). It is a minimal illustration of where a safety boundary belongs when payment authority is delegated to an autonomous agent. Full note: [docs/design/agent.md](docs/design/agent.md).
 

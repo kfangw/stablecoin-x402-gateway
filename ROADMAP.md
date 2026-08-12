@@ -49,18 +49,18 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] Traffic and adversary generators for the simulation harness, with metrics comparing policies on acceptance, losses, and escalations
 - [x] Attack catalog for the harness: inflated payment terms, payee spoofing, and induced repeat-purchase loops, each paired with a benign task so a policy's loss reduction and its cost to normal work are measured together
 - [x] Scripted delegator responder for the harness, with configurable error, non-response, and fatigue behavior
-- [ ] On-chain mandate enforcement: a delegated spending contract enforcing allowance, expiry, and payee allowlist for an agent, so the same mandate terms can be enforced by the gateway or by the chain and the two compared
-- [ ] Payment sessions: one authorization covering many requests, settled periodically
-- [ ] Resource discovery endpoint listing paid resources
+- [x] On-chain mandate enforcement: a delegated spending contract enforcing allowance, expiry, and payee allowlist for an agent, so the same mandate terms can be enforced by the gateway or by the chain and the two compared
+- [x] Payment sessions: one authorization covering many requests, settled periodically
+- [x] Resource discovery endpoint listing paid resources
 
 ## Asset delivery — M3
 
-- [ ] Mock RWA token contract; the gateway delivers the asset to the payer after settlement (two-transaction flow)
-- [ ] Refund path for the two-transaction flow: a delivery failure after settlement produces a recorded refund transfer instead of a silent loss
-- [ ] Atomic DvP contract: settlement and delivery in a single transaction
-- [ ] Eligibility registry (ERC-3643-inspired allowlist) checked before delivery, with a minimal form of delegator-to-agent eligibility inheritance
-- [ ] Freeze and allowlist controls on tKRW reflecting regulatory requirements
-- [ ] Asset-holdings ledger reconciled against the chain like the issuance ledger
+- [x] Mock RWA token contract; the gateway delivers the asset to the payer after settlement (two-transaction flow)
+- [x] Refund path for the two-transaction flow: a delivery failure after settlement produces a recorded refund transfer instead of a silent loss
+- [x] Atomic DvP contract: settlement and delivery in a single transaction
+- [x] Eligibility registry (ERC-3643-inspired allowlist) checked before delivery, with a minimal form of delegator-to-agent eligibility inheritance
+- [x] Freeze and allowlist controls on tKRW reflecting regulatory requirements
+- [x] Asset-holdings ledger reconciled against the chain like the issuance ledger
 
 ## Auditability and reserves — M4
 
