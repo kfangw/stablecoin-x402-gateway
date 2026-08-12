@@ -11,6 +11,7 @@ const solc = require('solc');
 const TARGETS = [
   { source: 'KRWTestStablecoin.sol', contract: 'KRWTestStablecoin', dest: 'token' },
   { source: 'IdentityRegistry.sol', contract: 'IdentityRegistry', dest: 'registry' },
+  { source: 'RWATestAsset.sol', contract: 'RWATestAsset', dest: 'asset' },
 ];
 
 const sources = {};
