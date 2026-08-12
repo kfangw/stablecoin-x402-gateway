@@ -27,6 +27,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
+	"github.com/kfangw/stablecoin-x402-gateway/eligibility"
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/registry"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
@@ -47,6 +48,7 @@ func run() error {
 	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint: local mode settlement, or read-only identity lookups in remote mode")
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
 	identityRegistry := fs.String("identity-registry", "", "identity registry address; when set, unregistered agents are rejected")
+	eligibilityRegistry := fs.String("eligibility-registry", "", "eligibility registry address; when set, ineligible payers are rejected before settlement")
 	requireMandate := fs.Bool("require-mandate", false, "require a delegator-signed mandate with each payment")
 	askOnExceed := fs.Bool("ask-on-exceed", false, "answer over-limit payments with confirmation_required instead of rejecting (requires --require-mandate)")
 	deferAbove := fs.Int64("defer-above", 0, "defer delivery for payments at or above this amount until confirmed (requires --require-mandate)")
@@ -95,6 +97,20 @@ func run() error {
 	// gains a read-only RPC connection for the registry.
 	if *identityRegistry != "" {
 		stop, err := attachIdentity(gw, client, *identityRegistry, *rpc)
+		if err != nil {
+			return err
+		}
+		if stop != nil {
+			defer stop()
+		}
+	}
+
+	// Optional eligibility policy: reject payers that are not eligible to receive
+	// the asset, before settlement. It stacks after any identity policy and before
+	// the mandate policy. The lookup is read-only, so a remote-mode gateway stays
+	// keyless.
+	if *eligibilityRegistry != "" {
+		stop, err := attachEligibility(gw, client, *eligibilityRegistry, *rpc)
 		if err != nil {
 			return err
 		}
@@ -235,6 +251,36 @@ func attachIdentity(gw *x402.Gateway, client *ethclient.Client, registryAddr, rp
 	reg := registry.Bind(common.HexToAddress(registryAddr), backend)
 	gw.Policy = x402.Chain{x402.AlwaysVerify{}, x402.IdentityPolicy{Registry: reg}}
 	log.Printf("identity policy on: registry %s", registryAddr)
+	return stop, nil
+}
+
+// attachEligibility stacks an eligibility policy after the current chain, so
+// ineligible payers are rejected before settlement. In local mode it reuses the
+// settlement client; in remote mode (client nil) it dials the RPC read-only for
+// lookups and returns a stop function to close that connection.
+func attachEligibility(gw *x402.Gateway, client *ethclient.Client, registryAddr, rpc string) (func(), error) {
+	if !common.IsHexAddress(registryAddr) {
+		return nil, fmt.Errorf("--eligibility-registry must be a valid address")
+	}
+	var (
+		backend bind.ContractBackend = client
+		stop    func()
+	)
+	if client == nil {
+		roClient, _, err := nodeutil.Dial(context.Background(), rpc)
+		if err != nil {
+			return nil, fmt.Errorf("eligibility lookups need a reachable --rpc: %w", err)
+		}
+		backend = roClient
+		stop = func() { roClient.Close() }
+	}
+	reg := eligibility.Bind(common.HexToAddress(registryAddr), backend)
+	base := x402.Chain{x402.AlwaysVerify{}}
+	if c, ok := gw.Policy.(x402.Chain); ok {
+		base = c
+	}
+	gw.Policy = append(base, x402.EligibilityPolicy{Registry: reg})
+	log.Printf("eligibility policy on: registry %s", registryAddr)
 	return stop, nil
 }
 
