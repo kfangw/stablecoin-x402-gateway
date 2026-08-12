@@ -19,10 +19,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
+	"github.com/kfangw/stablecoin-x402-gateway/spend"
+	"github.com/kfangw/stablecoin-x402-gateway/token"
 	"github.com/kfangw/stablecoin-x402-gateway/x402"
 )
 
@@ -44,6 +47,12 @@ func main() {
 		err = runConfirm(args)
 	case "revoke":
 		err = runRevoke(args)
+	case "deposit":
+		err = runDeposit(args)
+	case "mandate-onchain":
+		err = runMandateOnchain(args)
+	case "revoke-onchain":
+		err = runRevokeOnchain(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -62,12 +71,16 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: delegator <command> [flags]
 
 commands:
-  sign      sign a mandate granting an agent bounded spending authority
-  confirm   sign a confirmation approving one over-limit payment
-  revoke    revoke a mandate by signing its id and posting to the gateway
+  sign             sign a mandate granting an agent bounded spending authority
+  confirm          sign a confirmation approving one over-limit payment
+  revoke           revoke a mandate by signing its id and posting to the gateway
+  deposit          deposit tKRW into the on-chain delegated-spend contract
+  mandate-onchain  register a signed mandate on the delegated-spend contract
+  revoke-onchain   revoke a mandate on the delegated-spend contract
 
 the delegator key is read from the `+delegatorKeyEnv+` environment variable.
-renewing a mandate is just signing a new one.
+renewing a mandate is just signing a new one. The on-chain commands send
+transactions; the off-chain commands (sign, confirm, revoke) never do.
 `)
 }
 
@@ -327,4 +340,167 @@ func bytes32(s string) ([32]byte, error) {
 	}
 	copy(out[:], b)
 	return out, nil
+}
+
+// runDeposit deposits tKRW into the delegated-spend contract for the delegator.
+// It approves the contract then deposits, both on-chain from the delegator key.
+func runDeposit(args []string) error {
+	fs := flag.NewFlagSet("deposit", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	spendAddr := fs.String("spend", "", "DelegatedSpend contract address (required)")
+	tokenAddr := fs.String("token", "", "tKRW token address (required)")
+	amount := fs.Int64("amount", 0, "amount of tKRW to deposit (required)")
+	fs.Parse(args)
+	if !common.IsHexAddress(*spendAddr) || !common.IsHexAddress(*tokenAddr) {
+		return fmt.Errorf("--spend and --token must be valid addresses")
+	}
+	if *amount <= 0 {
+		return fmt.Errorf("--amount must be positive")
+	}
+
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	opts, _, err := nodeutil.TransactorFromEnv(delegatorKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+
+	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
+	sp := spend.Bind(common.HexToAddress(*spendAddr), client)
+	// Approve the contract to pull the deposit, then deposit.
+	approveTx, err := tok.Approve(opts, sp.Address, big.NewInt(*amount))
+	if err != nil {
+		return fmt.Errorf("approve: %w", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, approveTx); err != nil {
+		return fmt.Errorf("wait approve: %w", err)
+	}
+	depTx, err := sp.Deposit(opts, big.NewInt(*amount))
+	if err != nil {
+		return fmt.Errorf("deposit: %w", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, depTx); err != nil {
+		return fmt.Errorf("wait deposit: %w", err)
+	}
+	fmt.Printf("deposited %d tKRW into %s (tx %s)\n", *amount, sp.Address.Hex(), depTx.Hash().Hex())
+	return nil
+}
+
+// runMandateOnchain reads a signed mandate JSON and registers its terms on the
+// delegated-spend contract with setMandate. The resource scoping is dropped: the
+// chain cannot see URLs, so a warning is printed when the mandate carries any.
+func runMandateOnchain(args []string) error {
+	fs := flag.NewFlagSet("mandate-onchain", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	spendAddr := fs.String("spend", "", "DelegatedSpend contract address (required)")
+	mandateFile := fs.String("mandate", "", "signed mandate JSON file (required)")
+	fs.Parse(args)
+	if !common.IsHexAddress(*spendAddr) {
+		return fmt.Errorf("--spend must be a valid address")
+	}
+	if *mandateFile == "" {
+		return fmt.Errorf("--mandate is required")
+	}
+
+	data, err := os.ReadFile(*mandateFile)
+	if err != nil {
+		return fmt.Errorf("read mandate: %w", err)
+	}
+	var sm x402.SignedMandateJSON
+	if err := json.Unmarshal(data, &sm); err != nil {
+		return fmt.Errorf("parse mandate: %w", err)
+	}
+	m, err := sm.Mandate.ToMandate()
+	if err != nil {
+		return fmt.Errorf("mandate fields: %w", err)
+	}
+	if len(m.AllowedResources) > 0 {
+		fmt.Fprintln(os.Stderr, "warning: resource scoping stays off chain; the chain cannot see URLs, so allowedResources is ignored")
+	}
+
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	opts, _, err := nodeutil.TransactorFromEnv(delegatorKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+
+	sp := spend.Bind(common.HexToAddress(*spendAddr), client)
+	tx, err := sp.SetMandate(opts, m.MandateID, m.Agent,
+		orZero(m.MaxAmountPerPayment), orZero(m.ValidAfter), orZero(m.ValidBefore),
+		orZero(m.BudgetAmount), orZero(m.BudgetWindowSeconds), m.AllowedPayees)
+	if err != nil {
+		return fmt.Errorf("setMandate: %w", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, tx); err != nil {
+		return fmt.Errorf("wait setMandate: %w", err)
+	}
+	fmt.Printf("registered mandate %s on %s (tx %s)\n", hex.EncodeToString(m.MandateID[:]), sp.Address.Hex(), tx.Hash().Hex())
+	return nil
+}
+
+// runRevokeOnchain revokes a mandate on the delegated-spend contract by id.
+func runRevokeOnchain(args []string) error {
+	fs := flag.NewFlagSet("revoke-onchain", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	spendAddr := fs.String("spend", "", "DelegatedSpend contract address (required)")
+	idHex := fs.String("id", "", "mandate id (0x-prefixed 32-byte hex, required)")
+	fs.Parse(args)
+	if !common.IsHexAddress(*spendAddr) {
+		return fmt.Errorf("--spend must be a valid address")
+	}
+	id, err := parseMandateID(*idHex)
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	opts, _, err := nodeutil.TransactorFromEnv(delegatorKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+
+	sp := spend.Bind(common.HexToAddress(*spendAddr), client)
+	tx, err := sp.Revoke(opts, id)
+	if err != nil {
+		return fmt.Errorf("revoke: %w", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, tx); err != nil {
+		return fmt.Errorf("wait revoke: %w", err)
+	}
+	fmt.Printf("revoked mandate %s on %s (tx %s)\n", hex.EncodeToString(id[:]), sp.Address.Hex(), tx.Hash().Hex())
+	return nil
+}
+
+// orZero returns v, or a zero big.Int if v is nil, so unset mandate fields map to
+// the contract's "no constraint" defaults.
+func orZero(v *big.Int) *big.Int {
+	if v == nil {
+		return big.NewInt(0)
+	}
+	return v
+}
+
+// parseMandateID decodes a 0x-prefixed 32-byte hex string into a mandate id.
+func parseMandateID(s string) ([32]byte, error) {
+	var id [32]byte
+	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	if err != nil || len(b) != 32 {
+		return id, fmt.Errorf("--id must be 0x-prefixed 32-byte hex")
+	}
+	copy(id[:], b)
+	return id, nil
 }
