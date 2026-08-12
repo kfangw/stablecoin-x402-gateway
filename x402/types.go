@@ -85,6 +85,15 @@ type PaymentPayload struct {
 	// Confirmation, if present, is a delegator's signed approval of this one
 	// payment when it exceeds the mandate's limits (additive, like Mandate).
 	Confirmation *ConfirmationJSON `json:"confirmation,omitempty"`
+	// Session, if present, opens a payment session: the authorization covers a
+	// whole budget that many later requests draw from before it settles (additive).
+	Session *SessionRequest `json:"session,omitempty"`
+}
+
+// SessionRequest opens a payment session. The carrying authorization's value is
+// the session budget; Open must be true.
+type SessionRequest struct {
+	Open bool `json:"open"`
 }
 
 // SettlementResponse is the settlement result carried in the
@@ -105,8 +114,10 @@ type SettlementResponse struct {
 
 // HeaderPayment and HeaderPaymentResponse are the HTTP header names used by x402.
 const (
-	HeaderPayment         = "X-PAYMENT"
-	HeaderPaymentResponse = "X-PAYMENT-RESPONSE"
+	HeaderPayment             = "X-PAYMENT"
+	HeaderPaymentResponse     = "X-PAYMENT-RESPONSE"
+	HeaderPaymentSession      = "X-PAYMENT-SESSION"       // session id, on the response when opened and on later requests
+	HeaderPaymentSessionClose = "X-PAYMENT-SESSION-CLOSE" // "1" on a request to settle and close the session
 )
 
 // EncodeHeader serializes a value as JSON and wraps it in base64.

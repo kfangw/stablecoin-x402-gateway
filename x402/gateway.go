@@ -75,6 +75,13 @@ type Gateway struct {
 	// outstanding (pending) refund instead.
 	Refunder *Refunder
 
+	// SessionsEnabled turns on payment sessions: one authorization covering many
+	// requests, settled at close with the unused budget refunded. It requires a
+	// Refunder to return that unused budget.
+	SessionsEnabled bool
+	sessionStore    *sessionStore
+	sessionOnce     sync.Once
+
 	mu          sync.Mutex
 	Settlements []SettlementRecord
 
@@ -156,9 +163,25 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 		resource := "http://" + r.Host + r.URL.Path
 
 		header := r.Header.Get(HeaderPayment)
+
+		// A continuation request carries only the session id (no fresh payment).
+		if sid := r.Header.Get(HeaderPaymentSession); g.SessionsEnabled && sid != "" && header == "" {
+			g.handleSession(w, r, next, resource, sid)
+			return
+		}
+
 		if header == "" {
 			g.writeRequirements(w, resource, &failure{Code: ErrCodePaymentRequired, Reason: "X-PAYMENT header is required"})
 			return
+		}
+
+		// A session-open request carries a full-budget authorization and session={open:true}.
+		if g.SessionsEnabled {
+			var p PaymentPayload
+			if err := DecodeHeader(header, &p); err == nil && p.Session != nil && p.Session.Open {
+				g.openSession(w, r, next, resource, p)
+				return
+			}
 		}
 
 		record, fail := g.verifyAndSettle(r.Context(), header, g.Requirements(resource))

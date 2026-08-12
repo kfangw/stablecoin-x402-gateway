@@ -78,6 +78,8 @@ func runGet(args []string) error {
 	mandateFile := fs.String("mandate", "", "signed mandate file to attach to the payment")
 	confirmationFile := fs.String("confirmation", "", "signed confirmation file to attach when retrying an over-limit payment")
 	grantTable := fs.String("grant-table", "", "grant decision-table JSON file deciding whether to pay")
+	sessionBudget := fs.Int64("session-budget", 0, "open a payment session with this budget and draw requests from it, then close")
+	sessionRequests := fs.Int("session-requests", 3, "requests to make within the session before closing (with --session-budget)")
 	fs.Parse(args)
 
 	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
@@ -139,6 +141,11 @@ func runGet(args []string) error {
 	}
 	fmt.Printf("agent wallet %s, delegated limit %d tKRW\n", agent.Wallet.Address.Hex(), *max)
 
+	// Session mode: open a session, draw several requests from it, then close.
+	if *sessionBudget > 0 {
+		return runSession(agent, url, big.NewInt(*sessionBudget), *sessionRequests)
+	}
+
 	result, err := agent.Get(url)
 	if err != nil {
 		return err
@@ -168,6 +175,42 @@ func runGet(args []string) error {
 	fmt.Printf("response body: %s\n", result.Body)
 	if result.Settlement != nil {
 		fmt.Printf("settlement tx: %s\n", result.Settlement.Transaction)
+	}
+	return nil
+}
+
+// runSession opens a payment session, draws several requests from the budget,
+// and closes it. One signed authorization covers the whole run; the gateway
+// settles it and refunds the unused budget at close.
+func runSession(agent *x402.Agent, url string, budget *big.Int, requests int) error {
+	id, res, err := agent.OpenSession(url, budget)
+	if err != nil {
+		return err
+	}
+	if id == "" {
+		return fmt.Errorf("session was not opened: HTTP %d %s", res.StatusCode, errorField(res.Body))
+	}
+	fmt.Printf("opened session %s with budget %s tKRW (request 1 served)\n", id, budget)
+
+	for i := 2; i <= requests; i++ {
+		r, err := agent.SessionGet(url, id)
+		if err != nil {
+			return err
+		}
+		if r.StatusCode != 200 {
+			fmt.Printf("request %d: HTTP %d %s\n", i, r.StatusCode, r.ErrorCode)
+			break
+		}
+		fmt.Printf("request %d served from the session\n", i)
+	}
+
+	closed, err := agent.CloseSession(url, id)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("closed session: HTTP %d\n", closed.StatusCode)
+	if closed.Settlement != nil {
+		fmt.Printf("session settled: tx %s\n", closed.Settlement.Transaction)
 	}
 	return nil
 }

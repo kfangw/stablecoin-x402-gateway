@@ -71,6 +71,9 @@ type Result struct {
 	// Ask is set when ErrorCode is confirmation_required: it names the payment
 	// the delegator must confirm before a retry can settle.
 	Ask *AskRequest
+	// SessionID is the id the gateway assigned when a payment session was opened
+	// or continued, read from the X-PAYMENT-SESSION response header.
+	SessionID string
 }
 
 // RegistrationHint reports whether the paid request was refused because the
@@ -166,17 +169,23 @@ func (a *Agent) sendPayment(url, header string, amount *big.Int, req *PaymentReq
 	if err != nil {
 		return nil, fmt.Errorf("x402 agent: paid request: %w", err)
 	}
+	return a.buildResult(resp, amount, req)
+}
+
+// buildResult reads a response into a Result, decoding the settlement header, any
+// 402 error code, and the session id header.
+func (a *Agent) buildResult(resp *http.Response, amount *big.Int, req *PaymentRequirements) (*Result, error) {
 	body, err := readBody(resp)
 	if err != nil {
 		return nil, err
 	}
-
 	result := &Result{
 		StatusCode:  resp.StatusCode,
 		Body:        body,
 		Paid:        resp.StatusCode < 400,
 		AmountPaid:  amount,
 		Requirement: req,
+		SessionID:   resp.Header.Get(HeaderPaymentSession),
 	}
 	if h := resp.Header.Get(HeaderPaymentResponse); h != "" {
 		var s SettlementResponse
@@ -195,6 +204,128 @@ func (a *Agent) sendPayment(url, header string, amount *big.Int, req *PaymentReq
 		}
 	}
 	return result, nil
+}
+
+// fetchRequirements makes an unpaid request and returns the resource's payment
+// terms from the 402 response.
+func (a *Agent) fetchRequirements(url string) (PaymentRequirements, error) {
+	resp, err := a.httpClient().Get(url)
+	if err != nil {
+		return PaymentRequirements{}, fmt.Errorf("x402 agent: request: %w", err)
+	}
+	body, err := readBody(resp)
+	if err != nil {
+		return PaymentRequirements{}, err
+	}
+	if resp.StatusCode != http.StatusPaymentRequired {
+		return PaymentRequirements{}, fmt.Errorf("x402 agent: expected 402, got %d", resp.StatusCode)
+	}
+	var reqs RequirementsResponse
+	if err := json.Unmarshal(body, &reqs); err != nil {
+		return PaymentRequirements{}, fmt.Errorf("x402 agent: parse requirements: %w", err)
+	}
+	if len(reqs.Accepts) == 0 {
+		return PaymentRequirements{}, fmt.Errorf("x402 agent: no accepted payment methods")
+	}
+	return reqs.Accepts[0], nil
+}
+
+// OpenSession opens a payment session with the given budget. It signs a
+// full-budget authorization marked as a session open and returns the session id
+// the gateway assigned. Later requests draw on the budget with SessionGet.
+func (a *Agent) OpenSession(url string, budget *big.Int) (string, *Result, error) {
+	req, err := a.fetchRequirements(url)
+	if err != nil {
+		return "", nil, err
+	}
+	header, err := a.buildSessionOpen(req, budget)
+	if err != nil {
+		return "", nil, err
+	}
+	a.lastPaymentHeader = header
+	paid, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	paid.Header.Set(HeaderPayment, header)
+	resp, err := a.httpClient().Do(paid)
+	if err != nil {
+		return "", nil, fmt.Errorf("x402 agent: open session: %w", err)
+	}
+	res, err := a.buildResult(resp, budget, &req)
+	if err != nil {
+		return "", nil, err
+	}
+	return res.SessionID, res, nil
+}
+
+// SessionGet draws one request from an open session, carrying only the id.
+func (a *Agent) SessionGet(url, id string) (*Result, error) {
+	return a.sessionRequest(url, id, false)
+}
+
+// CloseSession settles and closes an open session.
+func (a *Agent) CloseSession(url, id string) (*Result, error) {
+	return a.sessionRequest(url, id, true)
+}
+
+func (a *Agent) sessionRequest(url, id string, close bool) (*Result, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set(HeaderPaymentSession, id)
+	if close {
+		req.Header.Set(HeaderPaymentSessionClose, "1")
+	}
+	resp, err := a.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("x402 agent: session request: %w", err)
+	}
+	return a.buildResult(resp, nil, nil)
+}
+
+// sessionValiditySeconds is how long a session authorization stays valid. A
+// session serves many requests over time, so it lives far longer than a single
+// payment and well beyond the gateway's settle margin.
+const sessionValiditySeconds = 3600
+
+// buildSessionOpen builds a full-budget authorization marked as a session open.
+func (a *Agent) buildSessionOpen(req PaymentRequirements, budget *big.Int) (string, error) {
+	nonce, err := wallet.NewNonce()
+	if err != nil {
+		return "", err
+	}
+	auth := wallet.Authorization{
+		From:        a.Wallet.Address,
+		To:          hexAddress(req.PayTo),
+		Value:       budget,
+		ValidAfter:  big.NewInt(0),
+		ValidBefore: big.NewInt(time.Now().Unix() + sessionValiditySeconds),
+		Nonce:       nonce,
+	}
+	sig, err := a.Wallet.SignAuthorization(a.DomainSeparator, auth)
+	if err != nil {
+		return "", err
+	}
+	return EncodeHeader(PaymentPayload{
+		X402Version: Version,
+		Scheme:      SchemeExact,
+		Network:     req.Network,
+		Mandate:     a.Mandate,
+		Session:     &SessionRequest{Open: true},
+		Payload: ExactPayload{
+			Signature: "0x" + hex.EncodeToString(sig),
+			Authorization: AuthorizationJSON{
+				From:        auth.From.Hex(),
+				To:          auth.To.Hex(),
+				Value:       auth.Value.String(),
+				ValidAfter:  auth.ValidAfter.String(),
+				ValidBefore: auth.ValidBefore.String(),
+				Nonce:       "0x" + hex.EncodeToString(auth.Nonce[:]),
+			},
+		},
+	})
 }
 
 // buildPayment builds an EIP-3009 authorization matching the payment terms,

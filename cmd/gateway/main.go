@@ -59,6 +59,7 @@ func run() error {
 	assetAddr := fs.String("asset", "", "RWA asset address; when set, the gateway delivers the asset after settlement (two-transaction flow, local mode)")
 	assetAmount := fs.Int64("asset-amount", 1, "units of the asset delivered per payment")
 	dvpAddr := fs.String("dvp", "", "DvP settlement contract address; when set, payment and delivery settle atomically (local mode)")
+	sessions := fs.Bool("sessions", false, "enable payment sessions: one authorization covering many requests, settled at close (local mode)")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
@@ -150,6 +151,14 @@ func run() error {
 		}
 	} else if *assetAddr != "" {
 		if err := attachDelivery(gw, client, *assetAddr, *assetAmount); err != nil {
+			return err
+		}
+	}
+
+	// Optional payment sessions. They settle the whole budget at close and refund
+	// the unused part, so they need the gateway key to move funds: local mode only.
+	if *sessions {
+		if err := attachSessions(gw, client); err != nil {
 			return err
 		}
 	}
@@ -346,6 +355,21 @@ func attachDvP(gw *x402.Gateway, client *ethclient.Client, dvpAddr string, amoun
 		AssetAmount: big.NewInt(amount),
 	}
 	log.Printf("dvp settlement on: contract %s, asset amount %d (atomic flow)", dvpAddr, amount)
+	return nil
+}
+
+// attachSessions turns on payment sessions and builds the refunder that returns
+// the unused budget at close. It reuses the gateway's own key and token binding,
+// so it requires local mode.
+func attachSessions(gw *x402.Gateway, client *ethclient.Client) error {
+	if client == nil {
+		return fmt.Errorf("--sessions requires local mode (no --facilitator-url)")
+	}
+	gw.SessionsEnabled = true
+	if gw.Refunder == nil {
+		gw.Refunder = &x402.Refunder{Token: gw.Token, Transactor: gw.Transactor, Backend: client}
+	}
+	log.Printf("payment sessions on: budget settled at close, unused amount refunded")
 	return nil
 }
 

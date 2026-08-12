@@ -15,6 +15,8 @@ const (
 	ErrCodeSettlementFailed       = "settlement_failed"        // settle returned success=false
 	ErrCodeSettlementError        = "settlement_error"         // settle call failed to complete
 	ErrCodeDeliveryFailed         = "delivery_failed"          // asset delivery failed after settlement
+	ErrCodeSessionUnknown         = "session_unknown"          // session id is unknown or already settled
+	ErrCodeSessionExhausted       = "session_exhausted"        // session budget spent; the session settled and closed
 	ErrCodePolicyRejected         = "policy_rejected"          // a policy rejected without its own code
 	ErrCodePaymentDeferred        = "payment_deferred"         // ActionDefer: re-evaluation pending
 	ErrCodeConfirmationRequired   = "confirmation_required"    // ActionAsk: delegator confirmation needed
