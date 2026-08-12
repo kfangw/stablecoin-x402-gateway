@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"sync"
@@ -67,6 +68,12 @@ type Gateway struct {
 	// Deliverer, if set, hands the purchased asset to the payer after settlement
 	// in the two-transaction flow. When nil the gateway settles without delivering.
 	Deliverer Deliverer
+
+	// Refunder, if set, returns a settled payment to the payer when delivery
+	// fails, so a post-settlement delivery failure is recorded as a refund rather
+	// than a silent loss. When nil, a delivery failure is journaled as an
+	// outstanding (pending) refund instead.
+	Refunder *Refunder
 
 	mu          sync.Mutex
 	Settlements []SettlementRecord
@@ -365,13 +372,80 @@ func (g *Gateway) deliver(ctx context.Context, record SettlementRecord) (Settlem
 	}
 	txHash, err := g.Deliverer.Deliver(ctx, record.Payer)
 	if err != nil {
-		return SettlementRecord{}, &failure{
-			Code:   ErrCodeDeliveryFailed,
-			Reason: fmt.Sprintf("settled in %s but delivery failed: %v", record.TxHash.Hex(), err),
-		}
+		return g.refund(ctx, record, err)
 	}
 	record.DeliveryTx = txHash
 	return record, nil
+}
+
+// refund handles a delivery failure after settlement. With a Refunder it returns
+// the payment to the payer and journals the refund; without one it journals an
+// outstanding refund. Either way it answers delivery_failed and leaves an
+// auditable record, so the payment is never silently lost.
+func (g *Gateway) refund(ctx context.Context, record SettlementRecord, deliverErr error) (SettlementRecord, *failure) {
+	settled := record.TxHash.Hex()
+	if g.Refunder != nil {
+		refundTx, rerr := g.Refunder.Refund(ctx, record.Payer, record.Amount)
+		if rerr != nil {
+			// The refund transfer itself failed: record it as outstanding so the
+			// loss is still visible for follow-up.
+			g.journalRefundPending(record)
+			return SettlementRecord{}, &failure{
+				Code:   ErrCodeDeliveryFailed,
+				Reason: fmt.Sprintf("settled in %s, delivery failed (%v), refund also failed (%v); refund left pending", settled, deliverErr, rerr),
+			}
+		}
+		g.journalRefund(record, refundTx)
+		return SettlementRecord{}, &failure{
+			Code:   ErrCodeDeliveryFailed,
+			Reason: fmt.Sprintf("settled in %s, delivery failed (%v); refunded in %s", settled, deliverErr, refundTx.Hex()),
+		}
+	}
+	// Keyless gateway: it cannot move funds, so the refund is recorded as pending.
+	g.journalRefundPending(record)
+	return SettlementRecord{}, &failure{
+		Code:   ErrCodeDeliveryFailed,
+		Reason: fmt.Sprintf("settled in %s, delivery failed (%v); refund pending (gateway holds no key to refund)", settled, deliverErr),
+	}
+}
+
+// journalRefund records an executed refund transfer, keyed by the refund tx hash.
+func (g *Gateway) journalRefund(record SettlementRecord, refundTx common.Hash) {
+	if g.Journal == nil {
+		return
+	}
+	e := JournalEntry{
+		ID:      refundTx.Hex(),
+		Payer:   record.Payer.Hex(),
+		Amount:  record.Amount.String(),
+		TxHash:  refundTx.Hex(),
+		Network: g.Network,
+		At:      time.Now().Unix(),
+		Kind:    "refund",
+	}
+	if err := g.Journal.Append(e); err != nil {
+		log.Printf("x402: journal refund: %v", err)
+	}
+}
+
+// journalRefundPending records an outstanding refund, keyed off the settlement
+// tx so it does not collide with the settlement entry.
+func (g *Gateway) journalRefundPending(record SettlementRecord) {
+	if g.Journal == nil {
+		return
+	}
+	e := JournalEntry{
+		ID:      record.TxHash.Hex() + ":refund_pending",
+		Payer:   record.Payer.Hex(),
+		Amount:  record.Amount.String(),
+		TxHash:  record.TxHash.Hex(),
+		Network: g.Network,
+		At:      time.Now().Unix(),
+		Kind:    "refund_pending",
+	}
+	if err := g.Journal.Append(e); err != nil {
+		log.Printf("x402: journal refund_pending: %v", err)
+	}
 }
 
 // enrich fills the context a policy reads: the delegator's confirmation history

@@ -20,6 +20,11 @@ type JournalEntry struct {
 	TxHash  string `json:"txHash"`
 	Network string `json:"network"`
 	At      int64  `json:"at"` // unix seconds
+	// Kind labels the entry. An empty Kind is a settlement, kept empty so old
+	// journals replay unchanged. Other values record delivery-flow outcomes:
+	// "refund" for an executed refund transfer and "refund_pending" for a refund
+	// that could not be executed (a keyless gateway) and is left outstanding.
+	Kind string `json:"kind,omitempty"`
 }
 
 // Journal is an append-only, fsync-on-write record of settlements. Two kinds of

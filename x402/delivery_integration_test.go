@@ -30,6 +30,7 @@ type deliveryHarness struct {
 	server      *httptest.Server
 	agent       *x402.Agent
 	asset       *asset.Asset
+	tok         *token.Token
 	sellerOpts  *bind.TransactOpts
 	payer       *wallet.Wallet
 	sellerAddr  common.Address
@@ -115,7 +116,7 @@ func newDeliveryHarness(t *testing.T, sellerAssetBalance int64) *deliveryHarness
 
 	return &deliveryHarness{
 		sim: sim, client: client, gw: gw, server: server, agent: agent,
-		asset: ast, sellerOpts: sellerOpts, payer: payer, sellerAddr: sellerAddr,
+		asset: ast, tok: tok, sellerOpts: sellerOpts, payer: payer, sellerAddr: sellerAddr,
 		assetAmount: assetAmount,
 	}
 }
