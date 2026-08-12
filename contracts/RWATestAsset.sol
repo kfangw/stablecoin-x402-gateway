@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+interface IEligibilityRegistry {
+    function isEligible(address account) external view returns (bool);
+}
+
 /// @title RWATestAsset (tRWA)
 /// @notice A demo real-world-asset token delivered to a payer after settlement.
 ///         It reuses the minimal tKRW skeleton: an ERC-20 with issuer-only mint
@@ -41,6 +45,7 @@ contract RWATestAsset {
 
     function mint(address to, uint256 value) external onlyIssuer {
         require(to != address(0), "tRWA: mint to zero");
+        _requireEligible(to);
         totalSupply += value;
         balanceOf[to] += value;
         emit Mint(to, value);
@@ -80,9 +85,19 @@ contract RWATestAsset {
 
     function _transfer(address from, address to, uint256 value) internal {
         require(to != address(0), "tRWA: transfer to zero");
+        _requireEligible(to);
         require(balanceOf[from] >= value, "tRWA: insufficient balance");
         balanceOf[from] -= value;
         balanceOf[to] += value;
         emit Transfer(from, to, value);
+    }
+
+    // Requires the recipient to be eligible when a registry is configured. The
+    // check is recipient-centric, in the spirit of ERC-3643: a holder was already
+    // checked when it acquired the asset, so the sender is not re-checked here.
+    function _requireEligible(address to) internal view {
+        if (registry != address(0)) {
+            require(IEligibilityRegistry(registry).isEligible(to), "tRWA: recipient not eligible");
+        }
     }
 }
