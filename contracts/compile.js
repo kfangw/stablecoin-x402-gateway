@@ -13,6 +13,7 @@ const TARGETS = [
   { source: 'IdentityRegistry.sol', contract: 'IdentityRegistry', dest: 'registry' },
   { source: 'RWATestAsset.sol', contract: 'RWATestAsset', dest: 'asset' },
   { source: 'EligibilityRegistry.sol', contract: 'EligibilityRegistry', dest: 'eligibility' },
+  { source: 'DvPSettlement.sol', contract: 'DvPSettlement', dest: 'dvp' },
 ];
 
 const sources = {};
