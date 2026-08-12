@@ -104,7 +104,7 @@ func run() error {
 	fmt.Printf("   identity registry: %s\n\n", reg.Address.Hex())
 
 	// ---- Off-chain ledger ----
-	led := ledger.New(tok, client)
+	led := ledger.New(tok.Address, tok, client)
 
 	fmt.Println("== 2. Gateway: protect a paid resource, require a registered agent ==")
 	gw := &x402.Gateway{

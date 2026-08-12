@@ -65,7 +65,7 @@ func TestReconcileConsistent(t *testing.T) {
 	tx, err = tok.Burn(issuer, b.Address, big.NewInt(1_000))
 	mustMine(t, sim, client, tx, err)
 
-	led := ledger.New(tok, client)
+	led := ledger.New(tok.Address, tok, client)
 	rep, err := led.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +104,7 @@ func TestReconcileDetectsMissedEvent(t *testing.T) {
 	tx, err = tok.Mint(issuer, a.Address, big.NewInt(2_000))
 	mustMine(t, sim, client, tx, err)
 
-	led := ledger.New(tok, droppingReader{inner: client})
+	led := ledger.New(tok.Address, tok, droppingReader{inner: client})
 	rep, err := led.Reconcile(context.Background())
 	if err != nil {
 		t.Fatal(err)

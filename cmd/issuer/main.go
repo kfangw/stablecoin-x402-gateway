@@ -197,7 +197,7 @@ func runReconcile(args []string) error {
 	defer client.Close()
 
 	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
-	led := ledger.New(tok, client)
+	led := ledger.New(tok.Address, tok, client)
 	rep, err := led.Reconcile(ctx)
 	if err != nil {
 		return err

@@ -20,8 +20,6 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-
-	"github.com/kfangw/stablecoin-x402-gateway/token"
 )
 
 var transferTopic = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
@@ -33,6 +31,14 @@ const DefaultFinalityDepth = 12
 // LogReader is the minimal interface needed to query event logs.
 type LogReader interface {
 	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
+}
+
+// TokenReader is the minimal on-chain read surface reconciliation needs: the
+// minted total and per-account balances. Both token.Token and asset.Asset
+// satisfy it, so the same ledger reconciles either the stablecoin or the asset.
+type TokenReader interface {
+	TotalSupply() (*big.Int, error)
+	BalanceOf(common.Address) (*big.Int, error)
 }
 
 // ChainReader reads logs and block headers. It is what incremental sync needs:
@@ -64,7 +70,7 @@ type Ledger struct {
 	tokenAddr common.Address
 	reader    LogReader
 	chain     ChainReader // set for incremental sync; nil on the full-rescan path
-	tok       *token.Token
+	tok       TokenReader
 
 	// FinalityDepth is how many blocks below head are treated as immutable by
 	// the incremental path. Blocks at or below head-FinalityDepth are merged
@@ -90,10 +96,12 @@ type Ledger struct {
 	hasCheckpoint  bool
 }
 
-// New creates a ledger for the full-rescan path (Sync and Reconcile).
-func New(tok *token.Token, reader LogReader) *Ledger {
+// New creates a ledger for the full-rescan path (Sync and Reconcile). The token
+// address identifies which contract's Transfer events to index; tok reads the
+// on-chain totals reconciliation compares against.
+func New(tokenAddr common.Address, tok TokenReader, reader LogReader) *Ledger {
 	return &Ledger{
-		tokenAddr:     tok.Address,
+		tokenAddr:     tokenAddr,
 		reader:        reader,
 		tok:           tok,
 		FinalityDepth: DefaultFinalityDepth,
@@ -105,8 +113,8 @@ func New(tok *token.Token, reader LogReader) *Ledger {
 
 // NewChain creates a ledger that can also sync incrementally from a ChainReader.
 // A finalityDepth of 0 falls back to DefaultFinalityDepth.
-func NewChain(tok *token.Token, chain ChainReader, finalityDepth uint64) *Ledger {
-	l := New(tok, chain)
+func NewChain(tokenAddr common.Address, tok TokenReader, chain ChainReader, finalityDepth uint64) *Ledger {
+	l := New(tokenAddr, tok, chain)
 	l.chain = chain
 	if finalityDepth > 0 {
 		l.FinalityDepth = finalityDepth

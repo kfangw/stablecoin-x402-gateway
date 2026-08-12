@@ -146,7 +146,7 @@ func TestE2EAgainstRealNode(t *testing.T) {
 	}
 
 	// The off-chain ledger reconciles against the node.
-	rep, err := ledger.New(tok, client).Reconcile(ctx)
+	rep, err := ledger.New(tok.Address, tok, client).Reconcile(ctx)
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}

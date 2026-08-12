@@ -25,12 +25,12 @@ func TestSyncIncrementalMatchesFullRescan(t *testing.T) {
 	tx, err = tok.Burn(issuer, b.Address, big.NewInt(1_000))
 	mustMine(t, sim, client, tx, err)
 
-	full := ledger.New(tok, client)
+	full := ledger.New(tok.Address, tok, client)
 	if err := full.Sync(ctx); err != nil {
 		t.Fatal(err)
 	}
 
-	inc := ledger.NewChain(tok, client, 100) // deep window: nothing finalizes here
+	inc := ledger.NewChain(tok.Address, tok, client, 100) // deep window: nothing finalizes here
 	if err := inc.SyncIncremental(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestSyncIncrementalRewindsReorg(t *testing.T) {
 	a, _ := wallet.New()
 	b, _ := wallet.New()
 
-	inc := ledger.NewChain(tok, client, 100) // deep window: nothing finalizes
+	inc := ledger.NewChain(tok.Address, tok, client, 100) // deep window: nothing finalizes
 	if err := inc.SyncIncremental(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestSyncIncrementalRejectsDeepReorg(t *testing.T) {
 	a, _ := wallet.New()
 	b, _ := wallet.New()
 
-	inc := ledger.NewChain(tok, client, 1) // shallow finality depth
+	inc := ledger.NewChain(tok.Address, tok, client, 1) // shallow finality depth
 
 	parent, err := client.HeaderByNumber(ctx, nil)
 	if err != nil {
