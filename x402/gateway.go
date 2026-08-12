@@ -64,6 +64,10 @@ type Gateway struct {
 	// the gateway delivers the resource. It only matters when a policy defers.
 	ConfirmDepth uint64
 
+	// Deliverer, if set, hands the purchased asset to the payer after settlement
+	// in the two-transaction flow. When nil the gateway settles without delivering.
+	Deliverer Deliverer
+
 	mu          sync.Mutex
 	Settlements []SettlementRecord
 
@@ -84,6 +88,9 @@ type SettlementRecord struct {
 	Amount *big.Int
 	TxHash common.Hash
 	Time   time.Time
+	// DeliveryTx is the asset-delivery transaction hash in the two-transaction
+	// flow, zero when no delivery was performed.
+	DeliveryTx common.Hash
 }
 
 // Requirements builds the payment terms of this gateway.
@@ -153,12 +160,16 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		settleHeader, err := EncodeHeader(SettlementResponse{
+		resp := SettlementResponse{
 			Success:     true,
 			Transaction: record.TxHash.Hex(),
 			Network:     g.Network,
 			Payer:       record.Payer.Hex(),
-		})
+		}
+		if record.DeliveryTx != (common.Hash{}) {
+			resp.DeliveryTransaction = record.DeliveryTx.Hex()
+		}
+		settleHeader, err := EncodeHeader(resp)
 		if err == nil {
 			w.Header().Set(HeaderPaymentResponse, settleHeader)
 		}
@@ -217,7 +228,11 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	d := g.policy().Decide(ctx, pc)
 	switch d.Action {
 	case ActionApprove:
-		return g.settle(ctx, p, reqs, pc)
+		record, fail := g.settle(ctx, p, reqs, pc)
+		if fail != nil {
+			return record, fail
+		}
+		return g.deliver(ctx, record)
 	case ActionDefer:
 		return g.beginDeferred(ctx, p, reqs, pc, nonce)
 	default:
@@ -336,7 +351,27 @@ func (g *Gateway) resumeDeferred(ctx context.Context, p PaymentPayload, reqs Pay
 		return SettlementRecord{}, &failure{Code: code, Reason: d.Reason}
 	}
 	g.inflightRemove(nonce)
-	return df.record, nil
+	return g.deliver(ctx, df.record)
+}
+
+// deliver hands the asset to the payer after settlement, when a Deliverer is
+// configured. It sets the delivery transaction on the record. A nil Deliverer
+// leaves the record unchanged, preserving the settle-without-delivery behavior.
+// A delivery failure is reported as delivery_failed; the settlement already
+// happened, so this is where a refund path attaches.
+func (g *Gateway) deliver(ctx context.Context, record SettlementRecord) (SettlementRecord, *failure) {
+	if g.Deliverer == nil {
+		return record, nil
+	}
+	txHash, err := g.Deliverer.Deliver(ctx, record.Payer)
+	if err != nil {
+		return SettlementRecord{}, &failure{
+			Code:   ErrCodeDeliveryFailed,
+			Reason: fmt.Sprintf("settled in %s but delivery failed: %v", record.TxHash.Hex(), err),
+		}
+	}
+	record.DeliveryTx = txHash
+	return record, nil
 }
 
 // enrich fills the context a policy reads: the delegator's confirmation history

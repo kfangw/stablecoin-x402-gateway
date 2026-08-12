@@ -97,6 +97,10 @@ type SettlementResponse struct {
 	// ErrorReason explains a Success=false outcome (for example a reverted
 	// settlement). It is omitted on success.
 	ErrorReason string `json:"errorReason,omitempty"`
+	// DeliveryTransaction is the hash of the asset-delivery transaction in the
+	// two-transaction flow, set when the gateway delivered the asset after
+	// settlement. It is omitted when no delivery was performed.
+	DeliveryTransaction string `json:"deliveryTransaction,omitempty"`
 }
 
 // HeaderPayment and HeaderPaymentResponse are the HTTP header names used by x402.

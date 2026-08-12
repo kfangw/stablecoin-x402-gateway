@@ -14,6 +14,7 @@ const (
 	ErrCodeEligibilityCheckFailed = "eligibility_check_failed" // eligibility lookup failed (fail closed)
 	ErrCodeSettlementFailed       = "settlement_failed"        // settle returned success=false
 	ErrCodeSettlementError        = "settlement_error"         // settle call failed to complete
+	ErrCodeDeliveryFailed         = "delivery_failed"          // asset delivery failed after settlement
 	ErrCodePolicyRejected         = "policy_rejected"          // a policy rejected without its own code
 	ErrCodePaymentDeferred        = "payment_deferred"         // ActionDefer: re-evaluation pending
 	ErrCodeConfirmationRequired   = "confirmation_required"    // ActionAsk: delegator confirmation needed
