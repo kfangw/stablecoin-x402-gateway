@@ -27,6 +27,8 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 
+	"github.com/kfangw/stablecoin-x402-gateway/asset"
+	"github.com/kfangw/stablecoin-x402-gateway/dvp"
 	"github.com/kfangw/stablecoin-x402-gateway/eligibility"
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/registry"
@@ -54,6 +56,9 @@ func run() error {
 	deferAbove := fs.Int64("defer-above", 0, "defer delivery for payments at or above this amount until confirmed (requires --require-mandate)")
 	confirmDepth := fs.Uint64("confirm-depth", 0, "blocks a deferred settlement must be deep before delivery")
 	acceptTable := fs.String("accept-table", "", "accept decision-table JSON file to add to the policy chain")
+	assetAddr := fs.String("asset", "", "RWA asset address; when set, the gateway delivers the asset after settlement (two-transaction flow, local mode)")
+	assetAmount := fs.Int64("asset-amount", 1, "units of the asset delivered per payment")
+	dvpAddr := fs.String("dvp", "", "DvP settlement contract address; when set, payment and delivery settle atomically (local mode)")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
@@ -128,6 +133,25 @@ func run() error {
 		gw.ConfirmDepth = *confirmDepth
 	} else if *askOnExceed || *deferAbove > 0 {
 		return fmt.Errorf("--ask-on-exceed and --defer-above require --require-mandate")
+	}
+
+	// Optional asset delivery. Either the two-transaction flow (--asset) or the
+	// atomic DvP flow (--dvp), never both. Both need chain access, so they are
+	// local-mode only; a remote facilitator does its own delivery.
+	if *assetAddr != "" && *dvpAddr != "" {
+		return fmt.Errorf("--asset and --dvp are mutually exclusive")
+	}
+	if (*assetAddr != "" || *dvpAddr != "") && *facilitatorURL != "" {
+		return fmt.Errorf("--asset and --dvp are local-mode only; configure delivery on the facilitator service in remote mode")
+	}
+	if *dvpAddr != "" {
+		if err := attachDvP(gw, client, *dvpAddr, *assetAmount); err != nil {
+			return err
+		}
+	} else if *assetAddr != "" {
+		if err := attachDelivery(gw, client, *assetAddr, *assetAmount); err != nil {
+			return err
+		}
 	}
 
 	// Optional accept decision table, appended to the policy chain.
@@ -282,6 +306,47 @@ func attachEligibility(gw *x402.Gateway, client *ethclient.Client, registryAddr,
 	gw.Policy = append(base, x402.EligibilityPolicy{Registry: reg})
 	log.Printf("eligibility policy on: registry %s", registryAddr)
 	return stop, nil
+}
+
+// attachDelivery sets the two-transaction asset deliverer: after settlement the
+// gateway transfers the asset from its own (payee) account to the payer. It
+// requires the gateway key, so it is local-mode only.
+func attachDelivery(gw *x402.Gateway, client *ethclient.Client, assetAddr string, amount int64) error {
+	if client == nil {
+		return fmt.Errorf("--asset requires local mode (no --facilitator-url)")
+	}
+	if !common.IsHexAddress(assetAddr) {
+		return fmt.Errorf("--asset must be a valid address")
+	}
+	gw.Deliverer = &x402.AssetDeliverer{
+		Asset:      asset.Bind(common.HexToAddress(assetAddr), client),
+		Transactor: gw.Transactor,
+		Amount:     big.NewInt(amount),
+		Backend:    client,
+	}
+	log.Printf("asset delivery on: asset %s, amount %d (two-transaction flow)", assetAddr, amount)
+	return nil
+}
+
+// attachDvP switches the gateway to atomic delivery-versus-payment: a single
+// settleAndDeliver transaction covers payment and delivery. It replaces the
+// gateway's facilitator, so the separate deliverer is not used.
+func attachDvP(gw *x402.Gateway, client *ethclient.Client, dvpAddr string, amount int64) error {
+	if client == nil {
+		return fmt.Errorf("--dvp requires local mode (no --facilitator-url)")
+	}
+	if !common.IsHexAddress(dvpAddr) {
+		return fmt.Errorf("--dvp must be a valid address")
+	}
+	gw.Facilitator = &x402.LocalFacilitator{
+		Token:       gw.Token,
+		Backend:     client,
+		Transactor:  gw.Transactor,
+		DvP:         dvp.Bind(common.HexToAddress(dvpAddr), client),
+		AssetAmount: big.NewInt(amount),
+	}
+	log.Printf("dvp settlement on: contract %s, asset amount %d (atomic flow)", dvpAddr, amount)
+	return nil
 }
 
 // attachMandate appends a mandate policy to the gateway's chain, so a payment

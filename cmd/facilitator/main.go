@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/kfangw/stablecoin-x402-gateway/dvp"
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 	"github.com/kfangw/stablecoin-x402-gateway/x402"
@@ -40,11 +42,16 @@ func run() error {
 	fs := flag.NewFlagSet("facilitator", flag.ExitOnError)
 	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
+	dvpAddr := fs.String("dvp", "", "DvP settlement contract address; when set, settle delivers the asset atomically")
+	assetAmount := fs.Int64("asset-amount", 1, "units of the asset delivered per settlement in DvP mode")
 	listen := fs.String("listen", ":8403", "listen address")
 	fs.Parse(os.Args[1:])
 
 	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
 		return fmt.Errorf("--token must be a valid address")
+	}
+	if *dvpAddr != "" && !common.IsHexAddress(*dvpAddr) {
+		return fmt.Errorf("--dvp must be a valid address")
 	}
 
 	ctx := context.Background()
@@ -64,6 +71,11 @@ func run() error {
 		Token:      tok,
 		Backend:    client,
 		Transactor: transactor,
+	}
+	if *dvpAddr != "" {
+		fac.DvP = dvp.Bind(common.HexToAddress(*dvpAddr), client)
+		fac.AssetAmount = big.NewInt(*assetAmount)
+		log.Printf("dvp settlement on: contract %s, asset amount %d", *dvpAddr, *assetAmount)
 	}
 	network := fmt.Sprintf("eip155:%s", chainID)
 

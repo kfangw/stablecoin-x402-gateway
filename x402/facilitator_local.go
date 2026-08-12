@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 
+	"github.com/kfangw/stablecoin-x402-gateway/dvp"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 	"github.com/kfangw/stablecoin-x402-gateway/wallet"
 )
@@ -26,6 +27,13 @@ type LocalFacilitator struct {
 	Transactor *bind.TransactOpts // signer of settlement transactions (pays gas)
 	Commit     func()             // mines a block on the simulated backend; nil against a real node
 	Timeout    time.Duration
+
+	// DvP, when set, switches Settle to the atomic delivery-versus-payment path:
+	// one settleAndDeliver transaction covers both payment and asset delivery, so
+	// the gateway's separate Deliverer is not used in this mode. AssetAmount is
+	// how much of the asset each settlement delivers.
+	DvP         *dvp.DvP
+	AssetAmount *big.Int
 
 	domainSeparator [32]byte
 	domainOnce      sync.Once
@@ -127,9 +135,18 @@ func (f *LocalFacilitator) Settle(ctx context.Context, p PaymentPayload, reqs Pa
 	if err != nil {
 		return nil, err
 	}
-	tx, err := f.Token.TransferWithAuthorization(
-		f.Transactor, auth.From, auth.To, auth.Value, auth.ValidAfter, auth.ValidBefore, auth.Nonce, v, r, s,
-	)
+	var tx *types.Transaction
+	if f.DvP != nil {
+		// Atomic path: settle payment and deliver the asset in one transaction.
+		// The payment recipient (auth.To) is the seller that hands over the asset.
+		tx, err = f.DvP.SettleAndDeliver(
+			f.Transactor, auth.To, f.AssetAmount, auth.From, auth.Value, auth.ValidAfter, auth.ValidBefore, auth.Nonce, v, r, s,
+		)
+	} else {
+		tx, err = f.Token.TransferWithAuthorization(
+			f.Transactor, auth.From, auth.To, auth.Value, auth.ValidAfter, auth.ValidBefore, auth.Nonce, v, r, s,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("settlement submit failed: %w", err)
 	}
