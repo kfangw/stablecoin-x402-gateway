@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/kfangw/stablecoin-x402-gateway/asset"
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/ledger"
 	"github.com/kfangw/stablecoin-x402-gateway/registry"
@@ -183,10 +184,16 @@ func runReconcile(args []string) error {
 	fs := flag.NewFlagSet("reconcile", flag.ExitOnError)
 	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
+	assetAddr := fs.String("asset", "", "RWA asset token address; when set, the asset holdings ledger is reconciled too")
 	fs.Parse(args)
 
 	if err := requireHexAddress("token", *tokenAddr); err != nil {
 		return err
+	}
+	if *assetAddr != "" {
+		if err := requireHexAddress("asset", *assetAddr); err != nil {
+			return err
+		}
 	}
 
 	ctx := context.Background()
@@ -197,24 +204,42 @@ func runReconcile(args []string) error {
 	defer client.Close()
 
 	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
-	led := ledger.New(tok.Address, tok, client)
+	ok := reconcileOne(ctx, "tKRW", ledger.New(tok.Address, tok, client))
+
+	// The asset holdings ledger reuses the same infrastructure: the asset shares
+	// tKRW's Transfer event shape, so the same three-way reconciliation applies.
+	if *assetAddr != "" {
+		ast := asset.Bind(common.HexToAddress(*assetAddr), client)
+		if !reconcileOne(ctx, "tRWA", ledger.New(ast.Address, ast, client)) {
+			ok = false
+		}
+	}
+	if !ok {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// reconcileOne runs one ledger's reconciliation and prints a labelled report. It
+// returns whether the ledger matched the chain.
+func reconcileOne(ctx context.Context, name string, led *ledger.Ledger) bool {
 	rep, err := led.Reconcile(ctx)
 	if err != nil {
-		return err
+		fmt.Printf("%s: reconcile error: %v\n", name, err)
+		return false
 	}
-	fmt.Printf("%d events, %d accounts\n", rep.Events, rep.Accounts)
-	fmt.Printf("minted %s - burned %s = ledger supply %s\n", rep.Minted, rep.Burned, rep.LedgerSupply)
-	fmt.Printf("on-chain totalSupply %s, sum of balances %s\n", rep.OnChainSupply, rep.SumBalances)
+	fmt.Printf("[%s] %d events, %d accounts\n", name, rep.Events, rep.Accounts)
+	fmt.Printf("[%s] minted %s - burned %s = ledger supply %s\n", name, rep.Minted, rep.Burned, rep.LedgerSupply)
+	fmt.Printf("[%s] on-chain totalSupply %s, sum of balances %s\n", name, rep.OnChainSupply, rep.SumBalances)
 	if rep.OK() {
-		fmt.Println("reconciliation passed: the ledger matches the chain")
-		return nil
+		fmt.Printf("[%s] reconciliation passed: the ledger matches the chain\n", name)
+		return true
 	}
-	fmt.Println("reconciliation mismatches:")
+	fmt.Printf("[%s] reconciliation mismatches:\n", name)
 	for _, m := range rep.Mismatches {
 		fmt.Println(" -", m)
 	}
-	os.Exit(1)
-	return nil
+	return false
 }
 
 func requireHexAddress(flagName, value string) error {
