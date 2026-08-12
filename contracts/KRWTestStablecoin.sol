@@ -21,6 +21,14 @@ contract KRWTestStablecoin {
     // EIP-3009: tracks whether a random 32-byte nonce has been used (replay protection)
     mapping(address => mapping(bytes32 => bool)) public authorizationState;
 
+    // Regulatory controls. A frozen account can neither send nor receive on the
+    // transfer paths; issuer mint and burn stay available so the issuer can still
+    // seize or redeem a frozen balance. The allowlist is opt-in: while enabled,
+    // both sides of a transfer (and a mint recipient) must be on the list.
+    mapping(address => bool) public frozen;
+    bool public allowlistEnabled;
+    mapping(address => bool) public allowed;
+
     // EIP-712 domain
     bytes32 public immutable DOMAIN_SEPARATOR;
     bytes32 public constant TRANSFER_WITH_AUTHORIZATION_TYPEHASH =
@@ -34,6 +42,9 @@ contract KRWTestStablecoin {
     event Burn(address indexed from, uint256 value);
     event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
     event PauseSet(bool paused);
+    event FrozenSet(address indexed account, bool frozen);
+    event AllowedSet(address indexed account, bool allowed);
+    event AllowlistEnabledSet(bool enabled);
     event IssuerTransferStarted(address indexed current, address indexed pending);
     event IssuerTransferred(address indexed previous, address indexed current);
 
@@ -68,6 +79,9 @@ contract KRWTestStablecoin {
 
     function mint(address to, uint256 value) external onlyIssuer whenNotPaused {
         require(to != address(0), "tKRW: mint to zero");
+        if (allowlistEnabled) {
+            require(allowed[to], "tKRW: recipient not allowed");
+        }
         totalSupply += value;
         balanceOf[to] += value;
         emit Mint(to, value);
@@ -85,6 +99,21 @@ contract KRWTestStablecoin {
     function setPaused(bool p) external onlyIssuer {
         paused = p;
         emit PauseSet(p);
+    }
+
+    function setFrozen(address account, bool value) external onlyIssuer {
+        frozen[account] = value;
+        emit FrozenSet(account, value);
+    }
+
+    function setAllowed(address account, bool value) external onlyIssuer {
+        allowed[account] = value;
+        emit AllowedSet(account, value);
+    }
+
+    function setAllowlistEnabled(bool enabled) external onlyIssuer {
+        allowlistEnabled = enabled;
+        emit AllowlistEnabledSet(enabled);
     }
 
     function transferIssuer(address newIssuer) external onlyIssuer {
@@ -128,6 +157,12 @@ contract KRWTestStablecoin {
 
     function _transfer(address from, address to, uint256 value) internal {
         require(to != address(0), "tKRW: transfer to zero");
+        require(!frozen[from], "tKRW: sender frozen");
+        require(!frozen[to], "tKRW: recipient frozen");
+        if (allowlistEnabled) {
+            require(allowed[from], "tKRW: sender not allowed");
+            require(allowed[to], "tKRW: recipient not allowed");
+        }
         require(balanceOf[from] >= value, "tKRW: insufficient balance");
         balanceOf[from] -= value;
         balanceOf[to] += value;

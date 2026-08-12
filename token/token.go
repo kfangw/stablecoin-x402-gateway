@@ -115,6 +115,35 @@ func (t *Token) Issuer() (common.Address, error) {
 	return out[0].(common.Address), nil
 }
 
+// Frozen reports whether an account is barred from sending or receiving on the
+// transfer paths.
+func (t *Token) Frozen(addr common.Address) (bool, error) {
+	out, err := t.call(nil, "frozen", addr)
+	if err != nil {
+		return false, err
+	}
+	return out[0].(bool), nil
+}
+
+// Allowed reports whether an account is on the transfer allowlist. It only
+// gates transfers while AllowlistEnabled is true.
+func (t *Token) Allowed(addr common.Address) (bool, error) {
+	out, err := t.call(nil, "allowed", addr)
+	if err != nil {
+		return false, err
+	}
+	return out[0].(bool), nil
+}
+
+// AllowlistEnabled reports whether the opt-in transfer allowlist is active.
+func (t *Token) AllowlistEnabled() (bool, error) {
+	out, err := t.call(nil, "allowlistEnabled")
+	if err != nil {
+		return false, err
+	}
+	return out[0].(bool), nil
+}
+
 // ---- State-changing methods ----
 
 func (t *Token) Mint(opts *bind.TransactOpts, to common.Address, value *big.Int) (*types.Transaction, error) {
@@ -127,6 +156,21 @@ func (t *Token) Burn(opts *bind.TransactOpts, from common.Address, value *big.In
 
 func (t *Token) Transfer(opts *bind.TransactOpts, to common.Address, value *big.Int) (*types.Transaction, error) {
 	return t.bound.Transact(opts, "transfer", to, value)
+}
+
+// SetFrozen freezes or unfreezes an account. Issuer only.
+func (t *Token) SetFrozen(opts *bind.TransactOpts, account common.Address, value bool) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "setFrozen", account, value)
+}
+
+// SetAllowed adds or removes an account from the transfer allowlist. Issuer only.
+func (t *Token) SetAllowed(opts *bind.TransactOpts, account common.Address, value bool) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "setAllowed", account, value)
+}
+
+// SetAllowlistEnabled turns the opt-in transfer allowlist on or off. Issuer only.
+func (t *Token) SetAllowlistEnabled(opts *bind.TransactOpts, enabled bool) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "setAllowlistEnabled", enabled)
 }
 
 // TransferWithAuthorization submits an EIP-3009 settlement transaction.

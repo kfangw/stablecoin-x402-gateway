@@ -103,6 +103,15 @@ func (f *LocalFacilitator) Verify(ctx context.Context, p PaymentPayload, reqs Pa
 	if bal.Cmp(auth.Value) < 0 {
 		return invalid(fmt.Sprintf("payer balance %s < %s", bal, auth.Value)), nil
 	}
+	// A frozen payer would revert settlement on chain; report it off-chain
+	// instead so the expensive transaction is never submitted.
+	frozen, err := f.Token.Frozen(auth.From)
+	if err != nil {
+		return nil, fmt.Errorf("frozen: %w", err)
+	}
+	if frozen {
+		return invalid("payer account is frozen"), nil
+	}
 
 	return &VerifyResult{IsValid: true, Payer: auth.From.Hex()}, nil
 }

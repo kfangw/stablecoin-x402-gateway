@@ -27,6 +27,9 @@ type facFixture struct {
 	fac     *x402.LocalFacilitator
 	tok     *token.Token
 	payer   *wallet.Wallet
+	issuer  *bind.TransactOpts
+	client  simulated.Client
+	commit  func()
 	domain  [32]byte
 	payTo   common.Address
 	network string
@@ -94,8 +97,22 @@ func newFacFixture(t *testing.T, price, payerFunds int64) *facFixture {
 		Asset:             tok.Address.Hex(),
 	}
 	return &facFixture{
-		fac: fac, tok: tok, payer: payer, domain: domain, payTo: payee.Address,
+		fac: fac, tok: tok, payer: payer, issuer: issuerOpts, client: client,
+		commit: func() { sim.Commit() }, domain: domain, payTo: payee.Address,
 		network: network, price: big.NewInt(price), reqs: reqs,
+	}
+}
+
+// freeze marks an account as frozen through the issuer and mines the change.
+func (f *facFixture) freeze(t *testing.T, addr common.Address) {
+	t.Helper()
+	tx, err := f.tok.SetFrozen(f.issuer, addr, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.commit()
+	if _, err := bind.WaitMined(context.Background(), f.client, tx); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -192,6 +209,15 @@ func TestLocalVerifyInsufficientBalance(t *testing.T) {
 	vr := mustVerify(t, f, f.payload(t, f.payer, f.price, f.network))
 	if vr.IsValid || !strings.Contains(vr.InvalidReason, "balance") {
 		t.Fatalf("want insufficient balance, got isValid=%v reason=%q", vr.IsValid, vr.InvalidReason)
+	}
+}
+
+func TestLocalVerifyFrozenPayer(t *testing.T) {
+	f := newFacFixture(t, 500, 10_000)
+	f.freeze(t, f.payer.Address)
+	vr := mustVerify(t, f, f.payload(t, f.payer, f.price, f.network))
+	if vr.IsValid || !strings.Contains(vr.InvalidReason, "frozen") {
+		t.Fatalf("want frozen rejection, got isValid=%v reason=%q", vr.IsValid, vr.InvalidReason)
 	}
 }
 
