@@ -42,6 +42,8 @@ func main() {
 	switch sub {
 	case "get":
 		err = runGet(args)
+	case "discover":
+		err = runDiscover(args)
 	case "register":
 		err = runRegister(args)
 	case "-h", "--help", "help":
@@ -63,6 +65,7 @@ func usage() {
 
 commands:
   get         pay for and fetch an x402-protected resource
+  discover    list a gateway's paid resources (and optionally buy the first)
   register    register the agent in the identity registry (one-time setup)
 
 the agent key is read from the `+agentKeyEnv+` environment variable.
@@ -211,6 +214,78 @@ func runSession(agent *x402.Agent, url string, budget *big.Int, requests int) er
 	fmt.Printf("closed session: HTTP %d\n", closed.StatusCode)
 	if closed.Settlement != nil {
 		fmt.Printf("session settled: tx %s\n", closed.Settlement.Transaction)
+	}
+	return nil
+}
+
+// runDiscover lists a gateway's paid resources and, with --buy, pays for the
+// first one, using it as the demo's entry point.
+func runDiscover(args []string) error {
+	fs := flag.NewFlagSet("discover", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint (only needed with --buy)")
+	tokenAddr := fs.String("token", "", "tKRW token address (required with --buy)")
+	max := fs.Int64("max", 1000, "delegated spending limit in tKRW (with --buy)")
+	buy := fs.Bool("buy", false, "pay for the first listed resource")
+	fs.Parse(args)
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: agent discover [flags] <resources-url>")
+	}
+	url := fs.Arg(0)
+
+	agent := &x402.Agent{}
+	disc, err := agent.Discover(url)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%-50s %-8s %s\n", "RESOURCE", "PRICE", "NETWORK")
+	for _, it := range disc.Items {
+		price, network := "?", "?"
+		if len(it.Accepts) > 0 {
+			price = it.Accepts[0].MaxAmountRequired
+			network = it.Accepts[0].Network
+		}
+		fmt.Printf("%-50s %-8s %s\n", it.Resource, price, network)
+	}
+	if !*buy {
+		return nil
+	}
+	if len(disc.Items) == 0 {
+		return fmt.Errorf("nothing to buy: no resources listed")
+	}
+	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
+		return fmt.Errorf("--token must be a valid address to buy")
+	}
+
+	ctx := context.Background()
+	client, _, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
+	domain, err := tok.DomainSeparator()
+	if err != nil {
+		return fmt.Errorf("read domain separator: %w", err)
+	}
+	key, err := agentKey()
+	if err != nil {
+		return err
+	}
+	agent.Wallet = wallet.FromKey(key)
+	agent.DomainSeparator = domain
+	agent.MaxAmount = big.NewInt(*max)
+
+	target := disc.Items[0].Resource
+	fmt.Printf("\nbuying first resource: %s\n", target)
+	result, err := agent.Get(target)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("HTTP %d\n", result.StatusCode)
+	if result.Paid {
+		fmt.Printf("paid %s tKRW, body: %s\n", result.AmountPaid, result.Body)
+	} else {
+		fmt.Printf("not paid: %s\n", result.ErrorCode)
 	}
 	return nil
 }

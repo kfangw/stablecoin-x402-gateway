@@ -37,6 +37,10 @@ type Gateway struct {
 	Network    string         // e.g. eip155:1337
 	Timeout    time.Duration  // how long to wait for settlement finality
 
+	// ResourcePath is the path of the protected resource, used to build its URL
+	// in the discovery response. Empty leaves the resource URL host-only.
+	ResourcePath string
+
 	// Commit is called by the local facilitator right after a settlement
 	// transaction is submitted. On a simulated backend it mines a block;
 	// against a real node leave it nil.
@@ -205,6 +209,27 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// DiscoveryHandler serves the unauthenticated GET /resources endpoint, listing
+// the paid resources this gateway serves in the public x402 discovery shape.
+func (g *Gateway) DiscoveryHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resource := "http://" + r.Host + g.ResourcePath
+		resp := DiscoveryResponse{
+			X402Version: Version,
+			Items: []DiscoveryItem{{
+				Resource:    resource,
+				Type:        "http",
+				X402Version: Version,
+				Accepts:     []PaymentRequirements{g.Requirements(resource)},
+				LastUpdated: time.Now().Unix(),
+			}},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		body, _ := json.Marshal(resp)
+		_, _ = w.Write(body)
+	}
 }
 
 func (g *Gateway) writeRequirements(w http.ResponseWriter, resource string, fail *failure) {

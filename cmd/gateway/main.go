@@ -185,8 +185,10 @@ func run() error {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(w, `{"report":"market report body","paid":true}`)
 	})
+	gw.ResourcePath = "/premium/report"
 	mux := http.NewServeMux()
 	mux.Handle("/premium/report", gw.Middleware(resource))
+	mux.HandleFunc("/resources", gw.DiscoveryHandler())
 	if *requireMandate {
 		mux.HandleFunc("/mandates/revoke", revokeHandler(gw))
 	}

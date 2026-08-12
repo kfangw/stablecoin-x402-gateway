@@ -112,6 +112,23 @@ type SettlementResponse struct {
 	DeliveryTransaction string `json:"deliveryTransaction,omitempty"`
 }
 
+// DiscoveryResponse lists the paid resources a gateway serves, following the
+// public x402 discovery shape. The gateway here serves a single resource, so
+// Items has length one, but the shape stays a list.
+type DiscoveryResponse struct {
+	X402Version int             `json:"x402Version"`
+	Items       []DiscoveryItem `json:"items"`
+}
+
+// DiscoveryItem describes one paid resource and how to pay for it.
+type DiscoveryItem struct {
+	Resource    string                `json:"resource"`
+	Type        string                `json:"type"`
+	X402Version int                   `json:"x402Version"`
+	Accepts     []PaymentRequirements `json:"accepts"`
+	LastUpdated int64                 `json:"lastUpdated"`
+}
+
 // HeaderPayment and HeaderPaymentResponse are the HTTP header names used by x402.
 const (
 	HeaderPayment             = "X-PAYMENT"

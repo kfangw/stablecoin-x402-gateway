@@ -328,6 +328,27 @@ func (a *Agent) buildSessionOpen(req PaymentRequirements, budget *big.Int) (stri
 	})
 }
 
+// Discover reads a gateway's /resources endpoint and returns the listed paid
+// resources. It needs no payment or key: discovery is unauthenticated.
+func (a *Agent) Discover(resourcesURL string) (*DiscoveryResponse, error) {
+	resp, err := a.httpClient().Get(resourcesURL)
+	if err != nil {
+		return nil, fmt.Errorf("x402 agent: discover: %w", err)
+	}
+	body, err := readBody(resp)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("x402 agent: discovery returned HTTP %d", resp.StatusCode)
+	}
+	var d DiscoveryResponse
+	if err := json.Unmarshal(body, &d); err != nil {
+		return nil, fmt.Errorf("x402 agent: parse discovery: %w", err)
+	}
+	return &d, nil
+}
+
 // buildPayment builds an EIP-3009 authorization matching the payment terms,
 // signs it, and encodes it as a header value.
 func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, error) {
