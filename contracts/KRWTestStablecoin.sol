@@ -35,6 +35,14 @@ contract KRWTestStablecoin {
         keccak256(
             "TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"
         );
+    // EIP-3009's second function. It requires the caller to be the recipient, so
+    // a signed authorization can only be executed by its intended receiver (for
+    // example a settlement contract), which closes the window where a third party
+    // could extract and submit the authorization on its own.
+    bytes32 public constant RECEIVE_WITH_AUTHORIZATION_TYPEHASH =
+        keccak256(
+            "ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"
+        );
 
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
@@ -184,20 +192,49 @@ contract KRWTestStablecoin {
         bytes32 r,
         bytes32 s
     ) external whenNotPaused {
+        _settleAuthorization(
+            TRANSFER_WITH_AUTHORIZATION_TYPEHASH, from, to, value, validAfter, validBefore, nonce, v, r, s
+        );
+    }
+
+    // receiveWithAuthorization is transferWithAuthorization with one added rule:
+    // the caller must be the recipient. It shares the same nonce space, so an
+    // authorization is spendable at most once across both functions.
+    function receiveWithAuthorization(
+        address from,
+        address to,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external whenNotPaused {
+        require(to == msg.sender, "tKRW: receiver must be the caller");
+        _settleAuthorization(
+            RECEIVE_WITH_AUTHORIZATION_TYPEHASH, from, to, value, validAfter, validBefore, nonce, v, r, s
+        );
+    }
+
+    function _settleAuthorization(
+        bytes32 typeHash,
+        address from,
+        address to,
+        uint256 value,
+        uint256 validAfter,
+        uint256 validBefore,
+        bytes32 nonce,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) internal {
         require(block.timestamp > validAfter, "tKRW: authorization not yet valid");
         require(block.timestamp < validBefore, "tKRW: authorization expired");
         require(!authorizationState[from][nonce], "tKRW: authorization used");
 
         bytes32 structHash = keccak256(
-            abi.encode(
-                TRANSFER_WITH_AUTHORIZATION_TYPEHASH,
-                from,
-                to,
-                value,
-                validAfter,
-                validBefore,
-                nonce
-            )
+            abi.encode(typeHash, from, to, value, validAfter, validBefore, nonce)
         );
         bytes32 digest = keccak256(
             abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)

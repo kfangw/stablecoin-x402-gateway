@@ -191,3 +191,17 @@ func (t *Token) TransferWithAuthorization(
 ) (*types.Transaction, error) {
 	return t.bound.Transact(opts, "transferWithAuthorization", from, to, value, validAfter, validBefore, nonce, v, r, s)
 }
+
+// ReceiveWithAuthorization submits an EIP-3009 receive settlement. The contract
+// requires the caller (opts) to be the authorization recipient, so it is used by
+// a recipient such as the DvP settlement contract. It shares the transfer
+// nonce space, so an authorization settles at most once across both functions.
+func (t *Token) ReceiveWithAuthorization(
+	opts *bind.TransactOpts,
+	from, to common.Address,
+	value, validAfter, validBefore *big.Int,
+	nonce [32]byte,
+	v uint8, r, s [32]byte,
+) (*types.Transaction, error) {
+	return t.bound.Transact(opts, "receiveWithAuthorization", from, to, value, validAfter, validBefore, nonce, v, r, s)
+}

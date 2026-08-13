@@ -19,6 +19,12 @@ var TransferWithAuthorizationTypeHash = crypto.Keccak256Hash(
 	[]byte("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"),
 )
 
+// ReceiveWithAuthorizationTypeHash is the type hash for EIP-3009's second
+// function, which the contract accepts only from the recipient.
+var ReceiveWithAuthorizationTypeHash = crypto.Keccak256Hash(
+	[]byte("ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"),
+)
+
 // Authorization is the EIP-3009 transfer authorization to be signed.
 type Authorization struct {
 	From        common.Address
@@ -29,11 +35,23 @@ type Authorization struct {
 	Nonce       [32]byte
 }
 
-// StructHash computes the EIP-712 struct hash.
-// Every field is a static type, so abi.encode reduces to 32-byte concatenation.
+// StructHash computes the EIP-712 struct hash for a transfer authorization.
 func (a Authorization) StructHash() [32]byte {
+	return a.structHashWith(TransferWithAuthorizationTypeHash)
+}
+
+// ReceiveStructHash computes the struct hash for a receive authorization. The
+// digest rule is identical; only the leading type hash differs, so a receive
+// signature never verifies as a transfer and vice versa.
+func (a Authorization) ReceiveStructHash() [32]byte {
+	return a.structHashWith(ReceiveWithAuthorizationTypeHash)
+}
+
+// structHashWith is the shared EIP-712 struct hash. Every field is a static
+// type, so abi.encode reduces to 32-byte concatenation.
+func (a Authorization) structHashWith(typeHash common.Hash) [32]byte {
 	buf := make([]byte, 0, 7*32)
-	buf = append(buf, TransferWithAuthorizationTypeHash.Bytes()...)
+	buf = append(buf, typeHash.Bytes()...)
 	buf = append(buf, common.LeftPadBytes(a.From.Bytes(), 32)...)
 	buf = append(buf, common.LeftPadBytes(a.To.Bytes(), 32)...)
 	buf = append(buf, common.LeftPadBytes(a.Value.Bytes(), 32)...)
@@ -92,12 +110,22 @@ func NewNonce() ([32]byte, error) {
 }
 
 // SignAuthorization produces a 65-byte signature (R||S||V, V in {27,28}) over
-// the authorization.
+// the transfer authorization.
 func (w *Wallet) SignAuthorization(domainSeparator [32]byte, a Authorization) ([]byte, error) {
+	return w.signStruct(domainSeparator, a, a.StructHash())
+}
+
+// SignReceiveAuthorization signs a receive authorization, whose settlement the
+// contract accepts only from the recipient.
+func (w *Wallet) SignReceiveAuthorization(domainSeparator [32]byte, a Authorization) ([]byte, error) {
+	return w.signStruct(domainSeparator, a, a.ReceiveStructHash())
+}
+
+func (w *Wallet) signStruct(domainSeparator [32]byte, a Authorization, structHash [32]byte) ([]byte, error) {
 	if a.From != w.Address {
 		return nil, fmt.Errorf("wallet: authorization.From %s != wallet %s", a.From, w.Address)
 	}
-	digest := Digest(domainSeparator, a.StructHash())
+	digest := Digest(domainSeparator, structHash)
 	sig, err := crypto.Sign(digest[:], w.key)
 	if err != nil {
 		return nil, fmt.Errorf("wallet: sign: %w", err)
