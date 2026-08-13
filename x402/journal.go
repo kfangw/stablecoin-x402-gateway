@@ -29,6 +29,37 @@ type JournalEntry struct {
 	// Receipt carries the signed settlement receipt on a "receipt" entry, so an
 	// auditor can verify the delegation-to-delivery chain from the journal alone.
 	Receipt *SignedReceiptJSON `json:"receipt,omitempty"`
+	// Decision carries the scalar inputs a policy saw and the outcome it reached,
+	// on a "decision" entry. A payment is logged once at decision time
+	// (settled=false) and once when its settlement is confirmed (settled=true);
+	// both are separate append-only lines and a replay takes the last per payment.
+	Decision *DecisionRecord `json:"decision,omitempty"`
+	// Revocation carries a mandate revocation, on a "revocation" entry, so the
+	// revocation set can be rebuilt from the journal alone.
+	Revocation *RevocationRecord `json:"revocation,omitempty"`
+}
+
+// DecisionRecord is the per-payment accept decision: the scalar inputs the policy
+// read and the outcome, plus whether the payment went on to settle. It lets an
+// auditor replay decisions and lets the gateway rebuild mandate accounting.
+type DecisionRecord struct {
+	Nonce     string  `json:"nonce"`
+	Amount    string  `json:"amount"`
+	RiskScore float64 `json:"riskScore"`
+	Stage     int     `json:"stage"`
+	AsksSoFar int     `json:"asksSoFar"`
+	MandateID string  `json:"mandateId,omitempty"`
+	Action    int     `json:"action"`
+	Code      string  `json:"code,omitempty"`
+	Settled   bool    `json:"settled"`
+}
+
+// RevocationRecord is a mandate revocation kept for audit: the id, the delegator
+// it was verified to, and the raw signature so the revocation can be re-verified.
+type RevocationRecord struct {
+	MandateID string `json:"mandateId"`
+	Delegator string `json:"delegator"`
+	Signature string `json:"signature"`
 }
 
 // Journal is an append-only, fsync-on-write record of settlements. Two kinds of

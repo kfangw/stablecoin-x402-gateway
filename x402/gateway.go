@@ -313,6 +313,7 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	pc := PaymentContext{Payload: p, Requirements: reqs, Verification: vr, Stage: StagePreSettlement}
 	g.enrich(&pc)
 	d := g.policy().Decide(ctx, pc)
+	g.recordDecision(pc, d, false)
 	switch d.Action {
 	case ActionApprove:
 		record, fail := g.settle(ctx, p, reqs, pc)
@@ -383,6 +384,80 @@ func (g *Gateway) issueReceipt(record SettlementRecord, reqs PaymentRequirements
 		}
 	}
 	return signed
+}
+
+// recordDecision journals the scalar inputs a policy saw and the outcome, once
+// at decision time (settled=false) and once when settlement is confirmed
+// (settled=true). Each is a separate append-only line keyed by nonce and phase.
+func (g *Gateway) recordDecision(pc PaymentContext, d Decision, settled bool) {
+	if g.Journal == nil {
+		return
+	}
+	nonce, _ := payloadNonce(pc.Payload)
+	nonceHex := "0x" + hex.EncodeToString(nonce[:])
+	amount := "0"
+	if a, ok := paymentAmount(pc); ok {
+		amount = a.String()
+	}
+	asks := 0
+	if pc.History != nil {
+		asks = pc.History.Asks
+	}
+	mandateID := ""
+	if pc.Payload.Mandate != nil {
+		mandateID = pc.Payload.Mandate.Mandate.MandateID
+	}
+	payer := ""
+	if pc.Verification != nil {
+		payer = pc.Verification.Payer
+	}
+	suffix := ":decision"
+	if settled {
+		suffix = ":decision:settled"
+	}
+	entry := JournalEntry{
+		ID:      nonceHex + suffix,
+		Payer:   payer,
+		Amount:  amount,
+		Network: g.Network,
+		At:      time.Now().Unix(),
+		Kind:    "decision",
+		Decision: &DecisionRecord{
+			Nonce:     nonceHex,
+			Amount:    amount,
+			RiskScore: pc.RiskScore,
+			Stage:     int(pc.Stage),
+			AsksSoFar: asks,
+			MandateID: mandateID,
+			Action:    int(d.Action),
+			Code:      d.Code,
+			Settled:   settled,
+		},
+	}
+	if err := g.Journal.Append(entry); err != nil {
+		log.Printf("x402: journal decision: %v", err)
+	}
+}
+
+// recordRevocation journals a verified mandate revocation.
+func (g *Gateway) recordRevocation(mandateIDHex string, delegator common.Address, signature string) {
+	if g.Journal == nil {
+		return
+	}
+	entry := JournalEntry{
+		ID:      mandateIDHex + ":revocation",
+		Network: g.Network,
+		At:      time.Now().Unix(),
+		Kind:    "revocation",
+		Revocation: &RevocationRecord{
+			MandateID: mandateIDHex,
+			Delegator: delegator.Hex(),
+			Signature: signature,
+		},
+	}
+	if err := g.Journal.Append(entry); err != nil {
+		log.Printf("x402: journal revocation: %v", err)
+	}
 }
 
 // checkResourceBinding confirms a fresh payment's nonce is derived from its
@@ -496,6 +571,9 @@ func (g *Gateway) settle(ctx context.Context, p PaymentPayload, reqs PaymentRequ
 	g.mu.Lock()
 	g.Settlements = append(g.Settlements, record)
 	g.mu.Unlock()
+	// Log the settled decision so mandate accounting can be rebuilt from the
+	// journal: this payment's spend is now committed.
+	g.recordDecision(pc, Decision{Action: ActionApprove}, true)
 	return record, nil
 }
 
@@ -746,6 +824,7 @@ func (g *Gateway) RevokeMandate(rev RevocationJSON) error {
 		return err
 	}
 	mp.revoke(delegator, mandateID)
+	g.recordRevocation(rev.MandateID, delegator, rev.Signature)
 	return nil
 }
 
@@ -803,6 +882,12 @@ func (g *Gateway) AttachJournal(j *Journal) {
 	g.Journal = j
 	g.Settlements = g.Settlements[:0]
 	for _, e := range j.Entries() {
+		// Only settlement entries (empty Kind) rebuild the settlements slice; the
+		// decision, revocation, receipt, and refund entries are for audit and
+		// accounting restore, not the settlement mirror.
+		if e.Kind != "" {
+			continue
+		}
 		amount, _ := new(big.Int).SetString(e.Amount, 10)
 		g.Settlements = append(g.Settlements, SettlementRecord{
 			Payer:  common.HexToAddress(e.Payer),

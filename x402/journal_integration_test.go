@@ -29,12 +29,19 @@ func TestGatewayJournalsAndRestores(t *testing.T) {
 		t.Fatalf("status = %d paid=%v, want 200 paid", result.StatusCode, result.Paid)
 	}
 
-	entries := j.Entries()
-	if len(entries) != 1 {
-		t.Fatalf("journal entries = %d, want 1", len(entries))
+	// The journal also carries decision entries now; the settlement is the single
+	// entry with an empty Kind.
+	var settlements []x402.JournalEntry
+	for _, e := range j.Entries() {
+		if e.Kind == "" {
+			settlements = append(settlements, e)
+		}
 	}
-	if entries[0].TxHash != result.Settlement.Transaction {
-		t.Errorf("journaled tx = %s, want %s", entries[0].TxHash, result.Settlement.Transaction)
+	if len(settlements) != 1 {
+		t.Fatalf("settlement journal entries = %d, want 1", len(settlements))
+	}
+	if settlements[0].TxHash != result.Settlement.Transaction {
+		t.Errorf("journaled tx = %s, want %s", settlements[0].TxHash, result.Settlement.Transaction)
 	}
 	j.Close()
 
