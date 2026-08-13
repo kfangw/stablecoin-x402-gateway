@@ -107,3 +107,15 @@ jobs:
             echo "== $f =="
             slither "$f" --config-file slither.config.json --fail-high
           done
+
+  # Probe the gateway for the x402 invariants (one payment settles at most once,
+  # resource binding, clean failed settlement) with the in-process --self target.
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run conformance checker
+        run: go run ./cmd/conform --self
