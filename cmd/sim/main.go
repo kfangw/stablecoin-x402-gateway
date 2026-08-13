@@ -57,8 +57,14 @@ func run() error {
 	fs.StringVar(&o.acceptTable, "accept-table", "", "accept decision-table JSON file")
 	fs.StringVar(&o.grantTable, "grant-table", "", "grant decision-table JSON file")
 	fs.Var(&o.compare, "compare", "extra 'label=accept.json:grant.json' table pair to compare (repeatable)")
+	replay := fs.String("replay", "", "replay a gateway journal's logged decisions against an alternative --accept-table instead of generating a workload")
 	out := fs.String("out", "", "write the reports as JSON to this file")
 	fs.Parse(os.Args[1:])
+
+	// Replay mode and the workload generator are mutually exclusive.
+	if *replay != "" {
+		return runReplay(*replay, o, *out)
+	}
 
 	combos, err := buildCombos(o)
 	if err != nil {
@@ -154,6 +160,76 @@ func buildCombos(o options) ([]sim.Config, error) {
 		combos = append(combos, c)
 	}
 	return combos, nil
+}
+
+// runReplay reads a gateway journal's logged decisions and replays them against
+// one or more alternative accept-table policies, reporting where each diverges
+// from what was logged. It reuses the policy-lab reporting; the table policies
+// read only the scalars a decision recorded (amount, stage, risk, ask count).
+func runReplay(journalPath string, o options, out string) error {
+	j, err := x402.Open(journalPath)
+	if err != nil {
+		return err
+	}
+	defer j.Close()
+
+	var records []x402.DecisionRecord
+	for _, e := range j.Entries() {
+		// The decision-time entries (settled=false) carry the action the policy
+		// actually took; the settled=true entries are the settlement confirmation.
+		if e.Kind == "decision" && e.Decision != nil && !e.Decision.Settled {
+			records = append(records, *e.Decision)
+		}
+	}
+	if len(records) == 0 {
+		return fmt.Errorf("no logged decisions in %s", journalPath)
+	}
+
+	var reports []sim.ReplayReport
+	if o.acceptTable != "" {
+		p, err := loadAcceptTable(o.acceptTable)
+		if err != nil {
+			return err
+		}
+		reports = append(reports, sim.Replay("accept-table", records, p))
+	}
+	for _, spec := range o.compare {
+		label, acceptFile, _, err := parseCompare(spec)
+		if err != nil {
+			return err
+		}
+		if acceptFile == "" {
+			continue
+		}
+		p, err := loadAcceptTable(acceptFile)
+		if err != nil {
+			return err
+		}
+		reports = append(reports, sim.Replay(label, records, p))
+	}
+	if len(reports) == 0 {
+		return fmt.Errorf("replay needs an alternative policy: pass --accept-table or --compare")
+	}
+
+	fmt.Printf("replayed %d logged decisions from %s\n", len(records), journalPath)
+	fmt.Print(sim.RenderReplay(reports))
+	if out != "" {
+		data, _ := json.MarshalIndent(reports, "", "  ")
+		if err := os.WriteFile(out, data, 0o644); err != nil {
+			return fmt.Errorf("write report: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "wrote %s\n", out)
+	}
+	return nil
+}
+
+// loadAcceptTable loads a decision-table accept policy from a file.
+func loadAcceptTable(path string) (x402.Policy, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read accept table: %w", err)
+	}
+	return x402.LoadTablePolicy(data)
 }
 
 func tableCombo(o options, label, acceptFile, grantFile string) (sim.Config, error) {
