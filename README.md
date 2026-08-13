@@ -26,9 +26,13 @@ go test ./...
 7. Reconcile  the off-chain ledger is checked against on-chain state in three ways
 8. Defend     replaying the same signature is rejected
 9. Delegate   a delegator signs a mandate and the gateway now also requires one
-10. Authorize the agent pays under the mandate, then an over-scope payment is refused with mandate_exceeded
-11. Revoke    the delegator withdraws the mandate and the next payment is refused with mandate_revoked
+10. Authorize the agent pays within the mandate's limits
+11. Confirm   a payment beyond the mandate is answered with an ask, and the retry settles once the delegator confirms it
+12. Revoke    the delegator withdraws the mandate and the next payment is refused with mandate_revoked
+13. Deliver   a large payment settles at once but its resource is delivered only after enough confirmations
 ```
+
+The demo covers the payment and delegation core; the full scenario through asset delivery, receipts, and the offline audit runs against a node with `scripts/testnet-demo.sh` (see Real node mode).
 
 ## Real node mode
 
@@ -79,6 +83,15 @@ skips otherwise:
 E2E_RPC_URL=http://localhost:8545 go test ./... -run E2E
 ```
 
+`scripts/testnet-demo.sh` runs the full scenario against any RPC node in one
+command: it deploys the contracts (binding to a deployed ERC-8004 registry when
+`IDENTITY_REGISTRY` is set), backs issuance with a reserve, provisions
+eligibility and the asset, starts a gateway with delivery and receipts enabled,
+registers the agent, signs a mandate, buys the resource, verifies the signed
+receipt with the `audit` command offline and on chain, and reconciles with the
+reserve invariant. All keys and addresses arrive through environment variables;
+nothing is hardcoded.
+
 ## Docker Compose
 
 The four-terminal scenario above is packaged as a Compose stack. `up` starts an
@@ -127,8 +140,13 @@ cmd/gateway/       standalone x402 gateway server (built-in or remote facilitato
 cmd/facilitator/   facilitator HTTP service: verify, settle (optionally through DvP), supported
 cmd/agent/         paying agent CLI: get (pay for a resource, or run a session), discover (list resources), register (join the identity registry)
 cmd/delegator/     delegation CLI: sign, confirm, revoke (off-chain), plus deposit, mandate-onchain, revoke-onchain (on-chain enforcement)
+reserve/           append-only reserve ledger that bounds issuance and backs the reserve invariant
 sim/               in-process policy lab: seeded workload, attack catalog, delegator responder, and metrics
-cmd/sim/           runs the policy lab and compares policy combinations over the same traffic
+cmd/sim/           runs the policy lab and compares policy combinations over the same traffic; replays decision logs and chain traces
+cmd/audit/         verifies a settlement receipt offline, from the mandate signature to the on-chain delivery
+cmd/conform/       probes a 402 endpoint for x402 invariant violations (replay, concurrency, resource binding)
+cmd/chainprofile/  measures per-depth rewind rates from observed chain history into a replayable trace
+scripts/           one-command public-testnet run of the full scenario, ending in an offline audit
 ```
 
 ## Design notes
@@ -177,6 +195,8 @@ go run ./cmd/gateway --facilitator-url http://localhost:8403 \
 
 **One code path for both backends.** The simulated demo and the real node mode drive the same gateway, ledger, and token code. Three seams make that work. The gateway's `Backend` and the ledger's `LogReader` are interfaces that both the simulated backend and `ethclient.Client` satisfy. The gateway's `Commit` hook mines a block on the simulated backend and is left nil against a real node, where `bind.WaitMined` polls for the receipt instead. Chain ID and the x402 network string are read from the node rather than hardcoded. Nothing in the core packages knows which backend it runs on. Full note: [docs/design/facilitator.md](docs/design/facilitator.md).
 
+**Operational surface without new dependencies.** The gateway and facilitator log structured events through an injected `log/slog` logger, answer `GET /healthz`, and serve counters as Prometheus text from `GET /metrics`, all from the standard library. Benchmarks cover the 402 path, the verify-settle round trip, and the policy chain; fuzz tests cover header and mandate parsing; and CI runs both alongside contract static analysis and `cmd/conform`, which probes the running gateway for x402 invariant violations. Full note: [docs/design/gateway.md](docs/design/gateway.md).
+
 ### The records
 
 **Why the ledger is rebuilt from events.** If the source of record for the off-chain ledger is the chain's event log, the ledger becomes derived state that can be discarded and rebuilt at any time. The `ledger` package re-reads every Transfer event, reconstructs per-account balances and the minted and burned totals, and reconciles them in three ways: minted minus burned against on-chain totalSupply, the sum of account balances against totalSupply, and each account's ledger balance against on-chain balanceOf. The tests include a deliberately faulty reader that drops one event, verifying that reconciliation actually catches indexing gaps. Full note: [docs/design/records.md](docs/design/records.md).
@@ -184,6 +204,8 @@ go run ./cmd/gateway --facilitator-url http://localhost:8403 \
 **Incremental indexing and reorgs.** The full rescan stays the verification path, but a live indexer cannot reread from genesis on every block. `SyncIncremental` reads only new blocks and keeps a window of recent blocks keyed by block hash. When a block's stored hash no longer matches the canonical chain, that block and the ones after it are rewound and the new canonical blocks are read in their place, so the same "converge to the chain" rule holds through a reorg. Blocks deeper than a finality depth are merged into the immutable aggregates; a reorg that reaches past that depth is reported as an error rather than silently rewriting settled history. Full note: [docs/design/records.md](docs/design/records.md).
 
 **Durable settlement journal and outbox.** Without a journal the gateway keeps settlements only in memory, so a crash loses the record of what it settled. With `--journal` the gateway writes each settlement to an append-only, fsynced JSONL file before it answers the request, so the settlement is durable by the time the caller learns it succeeded; on restart the file replays to rebuild the in-memory view, and a torn final line from a crash mid-write is dropped. Publishing then follows the outbox pattern: a separate loop scans the journal and delivers unpublished settlements through a `Sink`, marking each published only after the sink acknowledges it. The default sink (`--kafka-brokers`) produces to a Kafka topic, keyed by the settlement transaction hash. Delivery is at-least-once by construction, since a crash between the produce and the marker redelivers the event, so consumers deduplicate on that hash. Journaling and publishing are both opt-in; without the flags every existing path runs unchanged. Full note: [docs/design/records.md](docs/design/records.md).
+
+**Reserve-bounded issuance and redemption.** The reserve is an off-chain fact the chain cannot verify, so it lives in its own append-only JSONL ledger beside the settlement journal rather than inside the on-chain reconciliation. `issuer mint --reserve` refuses to raise supply above the recorded reserve total, `issuer redeem` settles a holder-signed redemption request by collecting the funds with `receiveWithAuthorization`, burning them, and recording the reserve withdrawal, and `issuer reconcile --reserve` adds a fourth invariant: the ledger supply never exceeds the reserve. Full note: [docs/design/records.md](docs/design/records.md).
 
 ## The policy lab
 
@@ -201,7 +223,7 @@ Reading the table: each row is one policy combination. `benign done` is the shar
 
 This repository verifies protocol flows; it is not a production implementation. In particular:
 
-- The contract is unaudited and the token uses zero decimals. Regulatory requirements such as reserve attestation, allowlists, and freezing are out of scope.
+- The contract is unaudited and the token uses zero decimals. Issuer freeze, the opt-in transfer allowlist, and reserve-bounded issuance model the shape of regulatory controls; third-party reserve attestation and the wider compliance surface remain out of scope.
 - The gateway can run the facilitator in-process or delegate to a remote one, but the facilitator itself is a single instance with no authentication, rate limiting, or horizontal scaling.
 - Agent identity uses a minimal local registry that records a registration flag and an agent-card URL. The card is stored but not fetched or validated, and the wider ERC-8004 identity and reputation surface is out of scope. A deployed registry would replace the local one behind the same read-only reader interface.
 - With a journal, mandate cumulative and rate accounting and the set of revoked mandates are rebuilt on startup from the recorded decisions and revocations, so they survive a restart. The confirmation history and the in-flight deferred-settlement map still live in gateway memory and reset on restart.
@@ -225,9 +247,9 @@ The design does not ask any party to trust another's honesty; each thing a party
 | Delegator | deny a mandate it signed | the mandate is an EIP-712 signature the auditor verifies to the delegator's address, with its chain id, so it cannot be repudiated or replayed on another chain |
 | Issuer | mint beyond the reserve | minting is bounded by the off-chain reserve total, and reconciliation flags any supply above it |
 
-## Roadmap
+## The full scenario
 
-[ROADMAP.md](ROADMAP.md) tracks what is built and what is planned, grouped by area. The unchecked items build toward the scenario stated at its head: a registered agent buys a mock RWA token over x402, within a delegated mandate, and a third party can audit the whole chain from delegation through payment and settlement to delivery. Complete, the system covers four areas.
+The scenario this repository set out to demonstrate is implemented end to end: a registered agent buys a mock RWA token over x402, within a delegated mandate, and a third party can audit the whole chain from delegation through payment and settlement to delivery. [ROADMAP.md](ROADMAP.md) lists the remaining exploratory directions and keeps the delivered work as a record. The system covers four areas.
 
 **A payment rail for machine-to-machine commerce.** Issuance and redemption bounded by a reserve ledger, gasless payment with the front-running window of `transferWithAuthorization` closed by `receiveWithAuthorization`, authorizations bound to the resource they pay for, and payment sessions that settle many requests periodically under one authorization.
 
@@ -237,9 +259,9 @@ The design does not ask any party to trust another's honesty; each thing a party
 
 **Delivery a third party can audit.** Mock RWA tokens delivered through a refundable two-transaction flow or atomic delivery-versus-payment, eligibility checks with delegator-to-agent inheritance, and signed receipts linking the mandate, the settlement transaction, and the invoice, verified offline end to end by an audit command. A conformance checker probes any 402 endpoint for violations of one-payment-one-resource and related invariants, and runs against this gateway in CI first.
 
-Each milestone lands with a runnable demonstration: `cmd/demo` and the Compose stack grow with the features, and the final milestone ships a scripted public-testnet run that ends with an offline audit of the receipts it produced.
+Each milestone landed with a runnable demonstration: `cmd/demo` and the Compose stack grew with the features, and `scripts/testnet-demo.sh` runs the full scenario against any node, ending with an offline audit of the receipts it produced.
 
-### The destination, dynamic view: the full scenario
+### The full scenario, dynamic view: one purchase
 
 One purchase of a mock RWA token, from mandate to third-party audit. The confirmation branch shows the Ask flow: a payment beyond the mandate is not refused but sent back for the delegator's confirmation.
 
@@ -281,9 +303,9 @@ sequenceDiagram
     Note over X: verifies the receipt offline end to end,<br/>from mandate signature to asset delivery
 ```
 
-### The destination, static view: roles at completion
+### The full scenario, static view: the roles
 
-Two roles join the implemented picture: the delegator, who signs and revokes mandates and answers confirmation requests, and the third party, who can verify the whole chain without trusting any participant. The chain grows from two contracts to six, and the records layer becomes the substrate of the audit.
+Beside the issuer, agent, gateway, and facilitator stand two more roles: the delegator, who signs and revokes mandates and answers confirmation requests, and the third party, who verifies the whole chain without trusting any participant. The chain holds six contracts, and the records layer is the substrate of the audit.
 
 ```mermaid
 %%{init: {"flowchart": {"nodeSpacing": 55, "rankSpacing": 75}}}%%
