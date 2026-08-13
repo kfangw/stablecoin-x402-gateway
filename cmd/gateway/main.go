@@ -198,9 +198,12 @@ func run() error {
 		fmt.Fprint(w, `{"report":"market report body","paid":true}`)
 	})
 	gw.ResourcePath = "/premium/report"
+	gw.Metrics = x402.NewMetrics()
 	mux := http.NewServeMux()
 	mux.Handle("/premium/report", gw.Middleware(resource))
 	mux.HandleFunc("/resources", gw.DiscoveryHandler())
+	mux.HandleFunc("/healthz", gw.HealthHandler())
+	mux.HandleFunc("/metrics", gw.MetricsHandler())
 	if *requireMandate {
 		mux.HandleFunc("/mandates/revoke", revokeHandler(gw))
 	}

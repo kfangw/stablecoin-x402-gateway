@@ -65,6 +65,11 @@ type Gateway struct {
 	// delivery, refunds, sessions). Nil keeps the gateway silent, unchanged.
 	Logger *slog.Logger
 
+	// Metrics, when set, counts requests, refusals, settlements, delivery,
+	// refunds, sessions, and settlement latency. Nil disables metrics. Its methods
+	// are nil-safe, so the gateway code calls them unconditionally.
+	Metrics *Metrics
+
 	// Commit is called by the local facilitator right after a settlement
 	// transaction is submitted. On a simulated backend it mines a block;
 	// against a real node leave it nil.
@@ -207,6 +212,7 @@ func (g *Gateway) facilitator() Facilitator {
 func (g *Gateway) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resource := "http://" + r.Host + r.URL.Path
+		g.Metrics.IncRequest()
 
 		header := r.Header.Get(HeaderPayment)
 
@@ -256,6 +262,22 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 	})
 }
 
+// HealthHandler serves GET /healthz with a 200 and a small status body.
+func (g *Gateway) HealthHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}
+}
+
+// MetricsHandler serves GET /metrics in the Prometheus text format.
+func (g *Gateway) MetricsHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_, _ = w.Write([]byte(g.Metrics.Render()))
+	}
+}
+
 // DiscoveryHandler serves the unauthenticated GET /resources endpoint, listing
 // the paid resources this gateway serves in the public x402 discovery shape.
 func (g *Gateway) DiscoveryHandler() http.HandlerFunc {
@@ -278,6 +300,7 @@ func (g *Gateway) DiscoveryHandler() http.HandlerFunc {
 }
 
 func (g *Gateway) writeRequirements(w http.ResponseWriter, resource string, fail *failure) {
+	g.Metrics.IncRefusal(fail.Code)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusPaymentRequired)
 	body, _ := json.Marshal(RequirementsResponse{
@@ -559,13 +582,17 @@ func (g *Gateway) settle(ctx context.Context, p PaymentPayload, reqs PaymentRequ
 		}
 	}
 
+	start := time.Now()
 	sr, err := g.facilitator().Settle(ctx, p, reqs)
+	g.Metrics.ObserveSettleLatency(time.Since(start))
 	if err != nil {
 		notify(false)
+		g.Metrics.IncSettleFail()
 		return SettlementRecord{}, &failure{Code: ErrCodeSettlementError, Reason: fmt.Sprintf("settlement error: %v", err)}
 	}
 	if sr == nil || !sr.Success {
 		notify(false)
+		g.Metrics.IncSettleFail()
 		reason := "settlement failed"
 		if sr != nil && sr.ErrorReason != "" {
 			reason = sr.ErrorReason
@@ -600,6 +627,7 @@ func (g *Gateway) settle(ctx context.Context, p PaymentPayload, reqs PaymentRequ
 	// Log the settled decision so mandate accounting can be rebuilt from the
 	// journal: this payment's spend is now committed.
 	g.recordDecision(pc, Decision{Action: ActionApprove}, true)
+	g.Metrics.IncSettleSuccess()
 	g.logInfo("settlement", "payer", record.Payer.Hex(), "amount", record.Amount.String(), "tx", record.TxHash.Hex())
 	return record, nil
 }
@@ -659,6 +687,7 @@ func (g *Gateway) deliver(ctx context.Context, record SettlementRecord) (Settlem
 		return g.refund(ctx, record, err)
 	}
 	record.DeliveryTx = txHash
+	g.Metrics.IncDelivery()
 	g.logInfo("delivery", "payer", record.Payer.Hex(), "tx", txHash.Hex())
 	return record, nil
 }
@@ -668,6 +697,7 @@ func (g *Gateway) deliver(ctx context.Context, record SettlementRecord) (Settlem
 // outstanding refund. Either way it answers delivery_failed and leaves an
 // auditable record, so the payment is never silently lost.
 func (g *Gateway) refund(ctx context.Context, record SettlementRecord, deliverErr error) (SettlementRecord, *failure) {
+	g.Metrics.IncRefund()
 	settled := record.TxHash.Hex()
 	if g.Refunder != nil {
 		refundTx, rerr := g.Refunder.Refund(ctx, record.Payer, record.Amount)

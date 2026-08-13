@@ -85,6 +85,16 @@ func run() error {
 	mux.HandleFunc("/verify", verifyHandler(fac, logger))
 	mux.HandleFunc("/settle", settleHandler(fac, logger))
 	mux.HandleFunc("/supported", supportedHandler(network))
+	// Health includes a chain-reachability check, since the facilitator settles
+	// on chain.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := client.BlockNumber(r.Context()); err != nil {
+			http.Error(w, `{"status":"chain unreachable"}`, http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
 
 	server := &http.Server{Addr: *listen, Handler: mux}
 	logger.Info("facilitator starting", "listen", *listen, "token", tok.Address.Hex(), "settler", facAddr.Hex(), "network", network)
