@@ -6,13 +6,18 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math/big"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/kfangw/stablecoin-x402-gateway/asset"
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
@@ -20,6 +25,8 @@ import (
 	"github.com/kfangw/stablecoin-x402-gateway/registry"
 	"github.com/kfangw/stablecoin-x402-gateway/reserve"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
+	"github.com/kfangw/stablecoin-x402-gateway/wallet"
+	"github.com/kfangw/stablecoin-x402-gateway/x402"
 )
 
 const issuerKeyEnv = "ISSUER_KEY"
@@ -46,6 +53,8 @@ func main() {
 		err = runReserve(args, +1)
 	case "reserve-sub":
 		err = runReserve(args, -1)
+	case "redeem":
+		err = runRedeem(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -70,6 +79,7 @@ commands:
   reconcile        reconcile the off-chain ledger against the node (--reserve adds the reserve invariant)
   reserve-add      record a reserve deposit
   reserve-sub      record a reserve withdrawal
+  redeem           settle a redemption request: collect, burn, and record the reserve withdrawal
 
 the issuer key is read from the `+issuerKeyEnv+` environment variable.
 `)
@@ -288,6 +298,117 @@ func reconcileOne(ctx context.Context, name string, led *ledger.Ledger) (*ledger
 		fmt.Println(" -", m)
 	}
 	return &rep, false
+}
+
+// runRedeem settles a redemption in three steps, stopping and reporting if any
+// step fails: collect the tokens with receiveWithAuthorization (the issuer is
+// both submitter and recipient, so the receive path fits), burn them, and record
+// the reserve withdrawal. A failure leaves the earlier steps in place and is
+// reported so the state is never silently inconsistent.
+func runRedeem(args []string) error {
+	fs := flag.NewFlagSet("redeem", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	tokenAddr := fs.String("token", "", "tKRW token address (required)")
+	requestFile := fs.String("request", "", "redemption request JSON file (required)")
+	reservePath := fs.String("reserve", "", "reserve ledger file (required)")
+	fs.Parse(args)
+
+	if err := requireHexAddress("token", *tokenAddr); err != nil {
+		return err
+	}
+	if *requestFile == "" || *reservePath == "" {
+		return fmt.Errorf("--request and --reserve are required")
+	}
+
+	raw, err := os.ReadFile(*requestFile)
+	if err != nil {
+		return fmt.Errorf("read request: %w", err)
+	}
+	var req x402.RedemptionRequestJSON
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return fmt.Errorf("parse request: %w", err)
+	}
+	auth, err := x402.ParseAuthorization(req.Authorization)
+	if err != nil {
+		return err
+	}
+	sig, err := hexBytes(req.Signature)
+	if err != nil {
+		return fmt.Errorf("request signature: %w", err)
+	}
+
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	opts, issuerAddr, err := nodeutil.TransactorFromEnv(issuerKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+
+	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
+	domain, err := tok.DomainSeparator()
+	if err != nil {
+		return fmt.Errorf("domain separator: %w", err)
+	}
+
+	// Verify the request off-chain before touching the chain.
+	signer, err := wallet.RecoverReceiveSigner(domain, auth, sig)
+	if err != nil {
+		return fmt.Errorf("verify request: %w", err)
+	}
+	if signer != auth.From {
+		return fmt.Errorf("redemption signature does not match its holder")
+	}
+	if auth.To != issuerAddr {
+		return fmt.Errorf("redemption recipient %s is not the issuer %s", auth.To.Hex(), issuerAddr.Hex())
+	}
+	if auth.ValidBefore.Cmp(big.NewInt(time.Now().Unix())) <= 0 {
+		return fmt.Errorf("redemption request has expired")
+	}
+
+	v, r, s, err := wallet.SplitSignature(sig)
+	if err != nil {
+		return err
+	}
+
+	// Step 1: collect the tokens into the issuer account.
+	recvTx, err := tok.ReceiveWithAuthorization(opts, auth.From, auth.To, auth.Value, auth.ValidAfter, auth.ValidBefore, auth.Nonce, v, r, s)
+	if err != nil {
+		return fmt.Errorf("redemption step 1 (collect) failed, nothing changed: %w", err)
+	}
+	if rc, err := bind.WaitMined(ctx, client, recvTx); err != nil || rc.Status != types.ReceiptStatusSuccessful {
+		return fmt.Errorf("redemption step 1 (collect) reverted, nothing changed: %v", err)
+	}
+
+	// Step 2: burn the collected tokens.
+	burnTx, err := tok.Burn(opts, issuerAddr, auth.Value)
+	if err != nil {
+		return fmt.Errorf("redemption step 2 (burn) failed; tokens collected in %s but not burned: %w", recvTx.Hash().Hex(), err)
+	}
+	if rc, err := bind.WaitMined(ctx, client, burnTx); err != nil || rc.Status != types.ReceiptStatusSuccessful {
+		return fmt.Errorf("redemption step 2 (burn) reverted; tokens collected in %s but not burned", recvTx.Hash().Hex())
+	}
+
+	// Step 3: record the reserve withdrawal.
+	rl, err := reserve.Open(*reservePath)
+	if err != nil {
+		return fmt.Errorf("redemption step 3 (reserve) failed to open; collected and burned but reserve not updated: %w", err)
+	}
+	defer rl.Close()
+	if err := rl.Append(new(big.Int).Neg(auth.Value), "redemption of "+auth.From.Hex()); err != nil {
+		return fmt.Errorf("redemption step 3 (reserve) failed; collected and burned but reserve not updated: %w", err)
+	}
+	fmt.Printf("redeemed %s tKRW from %s: collected %s, burned %s, reserve now %s\n",
+		auth.Value, auth.From.Hex(), recvTx.Hash().Hex(), burnTx.Hash().Hex(), rl.Total())
+	return nil
+}
+
+// hexBytes decodes a 0x-prefixed hex string.
+func hexBytes(s string) ([]byte, error) {
+	return hex.DecodeString(strings.TrimPrefix(s, "0x"))
 }
 
 // runReserve records a reserve movement: a deposit (add) or a withdrawal (sub).

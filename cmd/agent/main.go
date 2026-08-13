@@ -10,12 +10,14 @@ package main
 import (
 	"context"
 	"crypto/ecdsa"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"math/big"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -44,6 +46,8 @@ func main() {
 		err = runGet(args)
 	case "discover":
 		err = runDiscover(args)
+	case "redeem-request":
+		err = runRedeemRequest(args)
 	case "register":
 		err = runRegister(args)
 	case "-h", "--help", "help":
@@ -64,9 +68,10 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: agent <command> [flags]
 
 commands:
-  get         pay for and fetch an x402-protected resource
-  discover    list a gateway's paid resources (and optionally buy the first)
-  register    register the agent in the identity registry (one-time setup)
+  get             pay for and fetch an x402-protected resource
+  discover        list a gateway's paid resources (and optionally buy the first)
+  redeem-request  sign a redemption request (a receive authorization to the issuer)
+  register        register the agent in the identity registry (one-time setup)
 
 the agent key is read from the `+agentKeyEnv+` environment variable.
 `)
@@ -287,6 +292,88 @@ func runDiscover(args []string) error {
 	} else {
 		fmt.Printf("not paid: %s\n", result.ErrorCode)
 	}
+	return nil
+}
+
+// runRedeemRequest signs a redemption request: a receive authorization naming
+// the issuer as recipient, which the issuer collects, burns, and records as a
+// reserve withdrawal. The nonce is random; a redemption is not bound to a
+// resource.
+func runRedeemRequest(args []string) error {
+	fs := flag.NewFlagSet("redeem-request", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint (read-only, for the domain separator)")
+	tokenAddr := fs.String("token", "", "tKRW token address (required)")
+	to := fs.String("to", "", "issuer address that will collect the redemption (required)")
+	amount := fs.String("amount", "", "amount to redeem in tKRW (required)")
+	validFor := fs.Int64("valid-for", 3600, "seconds the request stays valid from now")
+	out := fs.String("out", "", "write the request here (default: stdout)")
+	fs.Parse(args)
+
+	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
+		return fmt.Errorf("--token must be a valid address")
+	}
+	if !common.IsHexAddress(*to) {
+		return fmt.Errorf("--to must be the issuer address")
+	}
+	value, ok := new(big.Int).SetString(*amount, 10)
+	if !ok || value.Sign() <= 0 {
+		return fmt.Errorf("invalid --amount %q", *amount)
+	}
+
+	ctx := context.Background()
+	client, _, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
+	domain, err := tok.DomainSeparator()
+	if err != nil {
+		return fmt.Errorf("read domain separator: %w", err)
+	}
+
+	key, err := agentKey()
+	if err != nil {
+		return err
+	}
+	w := wallet.FromKey(key)
+	nonce, err := wallet.NewNonce()
+	if err != nil {
+		return err
+	}
+	auth := wallet.Authorization{
+		From:        w.Address,
+		To:          common.HexToAddress(*to),
+		Value:       value,
+		ValidAfter:  big.NewInt(0),
+		ValidBefore: big.NewInt(time.Now().Unix() + *validFor),
+		Nonce:       nonce,
+	}
+	sig, err := w.SignReceiveAuthorization(domain, auth)
+	if err != nil {
+		return err
+	}
+	req := x402.RedemptionRequestJSON{
+		Authorization: x402.AuthorizationJSON{
+			From:        auth.From.Hex(),
+			To:          auth.To.Hex(),
+			Value:       auth.Value.String(),
+			ValidAfter:  auth.ValidAfter.String(),
+			ValidBefore: auth.ValidBefore.String(),
+			Nonce:       "0x" + hex.EncodeToString(auth.Nonce[:]),
+		},
+		Signature: "0x" + hex.EncodeToString(sig),
+	}
+	body, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		return err
+	}
+	if *out == "" {
+		fmt.Println(string(body))
+	} else if err := os.WriteFile(*out, body, 0o644); err != nil {
+		return fmt.Errorf("write request: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "signed a redemption of %s tKRW to issuer %s\n", value, *to)
 	return nil
 }
 
