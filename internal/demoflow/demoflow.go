@@ -14,6 +14,8 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -23,12 +25,19 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient/simulated"
 	"github.com/ethereum/go-ethereum/params"
 
+	"github.com/kfangw/stablecoin-x402-gateway/asset"
+	"github.com/kfangw/stablecoin-x402-gateway/dvp"
+	"github.com/kfangw/stablecoin-x402-gateway/eligibility"
 	"github.com/kfangw/stablecoin-x402-gateway/ledger"
 	"github.com/kfangw/stablecoin-x402-gateway/registry"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 	"github.com/kfangw/stablecoin-x402-gateway/wallet"
 	"github.com/kfangw/stablecoin-x402-gateway/x402"
 )
+
+// transferTopic is the ERC-20 Transfer event signature. The audit step scans a
+// settlement receipt's logs for the payment and delivery transfers.
+var transferTopic = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
 
 // Event is one beat of the demo. Text is the terminal rendering (with its own
 // newlines); the structured fields let a UI update role panels. Kind is one of
@@ -357,8 +366,254 @@ func Run(ctx context.Context, emit func(Event), gate func(step int)) error {
 		return fmt.Errorf("deferred payment should deliver once confirmed, got %d %q", delivered.StatusCode, delivered.ErrorCode)
 	}
 
-	e.done("demo complete: identity, signed payment, settlement, reconciliation, replay rejection, and the mandate lifecycle (grant, pay, ask and confirm, revoke, deferred delivery)\n")
+	// mine commits a block and waits for a transaction, so the remaining steps
+	// can submit provisioning transactions without repeating the boilerplate.
+	mine := func(tx *types.Transaction, err error) error {
+		if err != nil {
+			return err
+		}
+		sim.Commit()
+		_, err = bind.WaitMined(ctx, client, tx)
+		return err
+	}
+
+	e.step(14, "Provision: eligibility registry, RWA asset, and the DvP contract", "")
+	sellerKey, _ := crypto.GenerateKey()
+	sellerAddr := crypto.PubkeyToAddress(sellerKey.PublicKey)
+	if err := fundETH(ctx, sim, issuerKey, sellerAddr, chainID); err != nil {
+		return err
+	}
+	if err := fundETH(ctx, sim, issuerKey, delegator, chainID); err != nil {
+		return err
+	}
+	sellerOpts, err := bind.NewKeyedTransactorWithChainID(sellerKey, chainID)
+	if err != nil {
+		return err
+	}
+	delegatorOpts, err := bind.NewKeyedTransactorWithChainID(delegatorKey, chainID)
+	if err != nil {
+		return err
+	}
+
+	elig, etx, err := eligibility.Deploy(issuerOpts, client)
+	if err := mine(etx, err); err != nil {
+		return err
+	}
+	ast, atx, err := asset.Deploy(issuerOpts, client, elig.Address)
+	if err := mine(atx, err); err != nil {
+		return err
+	}
+	dvpC, dtx, err := dvp.Deploy(issuerOpts, client, tok.Address, ast.Address)
+	if err := mine(dtx, err); err != nil {
+		return err
+	}
+	e.logf("   eligibility %s, asset %s, dvp %s\n", elig.Address.Hex(), ast.Address.Hex(), dvpC.Address.Hex())
+
+	// The delegator is eligible and sponsors the agent, so the agent inherits
+	// eligibility; the seller stocks the asset and approves the DvP contract to
+	// pull it on delivery.
+	if err := mine(elig.SetEligible(issuerOpts, delegator, true)); err != nil {
+		return err
+	}
+	if err := mine(elig.DelegateEligibility(delegatorOpts, agentWallet.Address)); err != nil {
+		return err
+	}
+	// The seller must be eligible to hold the asset it delivers.
+	if err := mine(elig.SetEligible(issuerOpts, sellerAddr, true)); err != nil {
+		return err
+	}
+	if err := mine(ast.Mint(issuerOpts, sellerAddr, big.NewInt(10))); err != nil {
+		return err
+	}
+	if err := mine(ast.Approve(sellerOpts, dvpC.Address, big.NewInt(100))); err != nil {
+		return err
+	}
+	e.logf("   delegator %s is eligible and sponsors the agent; seller %s holds 10 tRWA\n\n", delegator.Hex(), sellerAddr.Hex())
+
+	// A second gateway settles through the DvP contract, gated by eligibility,
+	// and signs receipts. Its journal is the audit's revocation source.
+	dvpMandatePolicy := x402.NewMandatePolicy(chainID)
+	dvpGW := &x402.Gateway{
+		Token:             tok,
+		Backend:           client,
+		PayTo:             sellerAddr,
+		Price:             big.NewInt(500),
+		Network:           fmt.Sprintf("eip155:%s", chainID),
+		Commit:            func() { sim.Commit() },
+		DvPAddress:        dvpC.Address,
+		RequireBoundNonce: true,
+		ReceiptKey:        gatewayKey,
+		Policy: x402.Chain{
+			x402.AlwaysVerify{},
+			x402.IdentityPolicy{Registry: reg},
+			x402.EligibilityPolicy{Registry: elig},
+			dvpMandatePolicy,
+		},
+		Facilitator: &x402.LocalFacilitator{
+			Token:       tok,
+			Backend:     client,
+			Transactor:  sellerOpts,
+			Commit:      func() { sim.Commit() },
+			DvP:         dvpC,
+			AssetAmount: big.NewInt(1),
+		},
+	}
+	journalFile, err := os.CreateTemp("", "demoweb-journal-*.log")
+	if err != nil {
+		return err
+	}
+	journalFile.Close()
+	defer os.Remove(journalFile.Name())
+	journal, err := x402.Open(journalFile.Name())
+	if err != nil {
+		return err
+	}
+	defer journal.Close()
+	dvpGW.AttachJournal(journal)
+
+	assetHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"asset":"tRWA","delivered":true}`)
+	})
+	dvpServer := httptest.NewServer(dvpGW.Middleware(assetHandler))
+	defer dvpServer.Close()
+	assetResource := dvpServer.URL + "/premium/asset"
+
+	dvpMandate, err := signedMandate(delegatorKey, x402.Mandate{
+		Delegator:           delegator,
+		Agent:               agentWallet.Address,
+		MaxAmountPerPayment: big.NewInt(500),
+		AllowedPayees:       []common.Address{sellerAddr},
+		ValidAfter:          big.NewInt(0),
+		ValidBefore:         big.NewInt(time.Now().Unix() + 3600),
+		BudgetAmount:        big.NewInt(100_000),
+		MandateID:           [32]byte{0x04},
+	}, chainID)
+	if err != nil {
+		return err
+	}
+
+	e.step(15, "Refuse: an ineligible payer is turned away before settlement", "")
+	if err := mine(elig.SetEligible(issuerOpts, delegator, false)); err != nil {
+		return err
+	}
+	agent.Mandate = dvpMandate
+	agent.Confirmation = nil
+	agent.MaxAmount = big.NewInt(500)
+	ineligible, err := agent.Get(assetResource)
+	if err != nil {
+		return err
+	}
+	e.err(fmt.Sprintf("   HTTP %d, errorCode %q (the agent's sponsored eligibility was withdrawn)\n", ineligible.StatusCode, ineligible.ErrorCode), ineligible.ErrorCode)
+	if ineligible.ErrorCode != x402.ErrCodeNotEligible {
+		return fmt.Errorf("ineligible payer should be payer_not_eligible, got %q", ineligible.ErrorCode)
+	}
+	if err := mine(elig.SetEligible(issuerOpts, delegator, true)); err != nil {
+		return err
+	}
+	e.logf("   sponsorship restored: the agent is eligible again\n\n")
+
+	e.step(16, "Deliver atomically: DvP settles payment and delivery in one transaction", "")
+	bought, err := agent.Get(assetResource)
+	if err != nil {
+		return err
+	}
+	if bought.StatusCode != http.StatusOK {
+		return fmt.Errorf("DvP purchase should settle, got %d %q", bought.StatusCode, bought.ErrorCode)
+	}
+	settleTx := ""
+	if bought.Settlement != nil {
+		settleTx = bought.Settlement.Transaction
+	}
+	e.tx(fmt.Sprintf("   settlement tx: %s (payment and delivery together)\n", settleTx), settleTx)
+	agentTKRW, _ := tok.BalanceOf(agentWallet.Address)
+	sellerTKRW, _ := tok.BalanceOf(sellerAddr)
+	agentTRWA, _ := ast.BalanceOf(agentWallet.Address)
+	sellerTRWA, _ := ast.BalanceOf(sellerAddr)
+	e.balance(fmt.Sprintf("   agent: %s tKRW / %s tRWA, seller: %s tKRW / %s tRWA\n\n", agentTKRW, agentTRWA, sellerTKRW, sellerTRWA),
+		map[string]string{
+			"agent tKRW":  agentTKRW.String(),
+			"agent tRWA":  agentTRWA.String(),
+			"seller tKRW": sellerTKRW.String(),
+			"seller tRWA": sellerTRWA.String(),
+		})
+
+	e.step(17, "Receipt: the gateway signs the settlement", "")
+	if bought.Settlement == nil || bought.Settlement.Receipt == nil {
+		return fmt.Errorf("DvP settlement should carry a signed receipt")
+	}
+	signedReceipt := bought.Settlement.Receipt
+	receipt, err := signedReceipt.Receipt.ToReceipt()
+	if err != nil {
+		return err
+	}
+	e.logf("   settlement tx %s, mandate %s\n", receipt.SettlementTx.Hex(), "0x"+hex.EncodeToString(receipt.MandateID[:]))
+	e.logf("   signed for delegator %s, payer %s\n\n", receipt.Delegator.Hex(), receipt.Payer.Hex())
+
+	e.step(18, "Audit: verify the receipt offline, then confirm settlement on chain", "")
+	receiptSig, err := hex.DecodeString(strings.TrimPrefix(signedReceipt.Signature, "0x"))
+	if err != nil {
+		return err
+	}
+	signer, verifyErr := x402.VerifyReceipt(receipt, receiptSig)
+	e.audit("receipt signature", verifyErr == nil && signer == gatewayAddr, fmt.Sprintf("signed by %s", signer.Hex()))
+
+	mand, err := dvpMandate.Mandate.ToMandate()
+	if err != nil {
+		return err
+	}
+	mandateSig, err := hex.DecodeString(strings.TrimPrefix(dvpMandate.Signature, "0x"))
+	if err != nil {
+		return err
+	}
+	recovered, mandateErr := x402.VerifyMandate(mand, mandateSig, chainID)
+	chainOK := mandateErr == nil && recovered == receipt.Delegator && mand.Agent == receipt.Payer && mand.MandateID == receipt.MandateID
+	e.audit("mandate delegation chain", chainOK, fmt.Sprintf("delegator %s, agent %s", recovered.Hex(), mand.Agent.Hex()))
+
+	mandateHex := "0x" + hex.EncodeToString(receipt.MandateID[:])
+	revokedBefore := false
+	for _, en := range journal.Entries() {
+		if en.Kind == "revocation" && en.Revocation != nil &&
+			strings.EqualFold(en.Revocation.MandateID, mandateHex) && en.At < receipt.IssuedAt {
+			revokedBefore = true
+		}
+	}
+	e.audit("revocation status", !revokedBefore, "no revocation before the receipt was issued")
+
+	scopeErr := mand.WithinScope(receipt.PayTo, receipt.Resource, receipt.Amount)
+	e.audit("payment within mandate scope", scopeErr == nil, "amount, payee, and resource are within scope")
+
+	rc, err := client.TransactionReceipt(ctx, receipt.SettlementTx)
+	if err != nil {
+		return err
+	}
+	paidOnChain := rc.Status == types.ReceiptStatusSuccessful && hasTransfer(rc, receipt.PayTo, receipt.Amount)
+	e.audit("settlement on chain", paidOnChain, fmt.Sprintf("settlement tx %s status %d", receipt.SettlementTx.Hex(), rc.Status))
+	e.audit("asset delivery on chain", hasTransfer(rc, receipt.Payer, nil), "asset delivered within the settlement transaction")
+
+	e.done("demo complete: identity, signed payment, settlement, reconciliation, replay rejection, the mandate lifecycle (grant, pay, ask and confirm, revoke, deferred delivery), eligibility-gated DvP delivery, a signed receipt, and an offline audit\n")
 	return nil
+}
+
+// hasTransfer reports whether the receipt logs contain an ERC-20 Transfer to
+// `to`; when amount is non-nil the value must also match. The recipient is the
+// third indexed topic. It mirrors the audit command's on-chain check.
+func hasTransfer(rc *types.Receipt, to common.Address, amount *big.Int) bool {
+	for _, lg := range rc.Logs {
+		if len(lg.Topics) != 3 || lg.Topics[0] != transferTopic {
+			continue
+		}
+		if common.BytesToAddress(lg.Topics[2].Bytes()) != to {
+			continue
+		}
+		if amount == nil {
+			return true
+		}
+		if new(big.Int).SetBytes(lg.Data).Cmp(amount) == 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // emitter carries the emit and gate callbacks and formats events.
@@ -392,6 +647,14 @@ func (e *emitter) balance(text string, balances map[string]string) {
 
 func (e *emitter) mandate(text, id string) {
 	e.emit(Event{Kind: "log", Text: text, MandateID: id})
+}
+
+func (e *emitter) audit(name string, ok bool, detail string) {
+	status := "PASS"
+	if !ok {
+		status = "FAIL"
+	}
+	e.emit(Event{Kind: "audit", AuditStep: name, AuditOK: ok, Text: fmt.Sprintf("   [%s] %s: %s\n", status, name, detail)})
 }
 
 func (e *emitter) done(text string) {

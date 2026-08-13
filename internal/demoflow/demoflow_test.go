@@ -33,8 +33,8 @@ func TestRunGolden(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if steps != 13 {
-		t.Fatalf("expected 13 step events, got %d", steps)
+	if steps != 18 {
+		t.Fatalf("expected 18 step events, got %d", steps)
 	}
 
 	got := normalize(buf.String())
@@ -44,6 +44,48 @@ func TestRunGolden(t *testing.T) {
 	}
 	if got != string(want) {
 		t.Errorf("rendered demo does not match testdata/demo.golden\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+}
+
+// TestRunExtended asserts the outcomes of the M3/M4 beats: the ineligible payer
+// is refused with payer_not_eligible, the audit steps all pass, and the agent
+// ends holding the delivered asset.
+func TestRunExtended(t *testing.T) {
+	var events []demoflow.Event
+	err := demoflow.Run(context.Background(), func(e demoflow.Event) {
+		events = append(events, e)
+	}, func(int) {})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	sawIneligible := false
+	audits := 0
+	agentAsset := ""
+	for _, e := range events {
+		if e.Kind == "error" && e.ErrorCode == "payer_not_eligible" {
+			sawIneligible = true
+		}
+		if e.Kind == "audit" {
+			audits++
+			if !e.AuditOK {
+				t.Errorf("audit step %q did not pass", e.AuditStep)
+			}
+		}
+		if e.Kind == "balance" {
+			if v, ok := e.Balances["agent tRWA"]; ok {
+				agentAsset = v
+			}
+		}
+	}
+	if !sawIneligible {
+		t.Error("expected a payer_not_eligible refusal event")
+	}
+	if audits != 6 {
+		t.Errorf("expected 6 audit events, got %d", audits)
+	}
+	if agentAsset != "1" {
+		t.Errorf("agent tRWA balance = %q, want 1", agentAsset)
 	}
 }
 
@@ -57,7 +99,7 @@ func TestRunGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}
+	want := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}
 	if len(gated) != len(want) {
 		t.Fatalf("gate called %d times, want %d: %v", len(gated), len(want), gated)
 	}

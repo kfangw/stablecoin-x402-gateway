@@ -30,9 +30,14 @@ go test ./...
 11. Confirm   a payment beyond the mandate is answered with an ask, and the retry settles once the delegator confirms it
 12. Revoke    the delegator withdraws the mandate and the next payment is refused with mandate_revoked
 13. Deliver   a large payment settles at once but its resource is delivered only after enough confirmations
+14. Provision the registrar deploys the eligibility registry, the RWA asset, and the DvP contract, and the delegator sponsors the agent's eligibility
+15. Screen    an ineligible payer is turned away before settlement with errorCode payer_not_eligible
+16. Exchange  the agent buys the asset over DvP, settling payment and delivery in a single transaction
+17. Receipt   the gateway signs a settlement receipt linking the mandate, the settlement, and the invoice
+18. Audit     an auditor verifies the receipt offline and confirms the settlement on chain
 ```
 
-The demo covers the payment and delegation core; the full scenario through asset delivery, receipts, and the offline audit runs against a node with `scripts/testnet-demo.sh` (see Real node mode).
+The demo runs the full scenario end to end, from issuance through delegation, eligibility-gated DvP delivery, a signed receipt, and an offline audit. The same code runs against a real node with `scripts/testnet-demo.sh` (see Real node mode).
 
 ## Real node mode
 

@@ -47,4 +47,27 @@
    HTTP 402, errorCode "payment_deferred" (settled, delivery held for 2 confirmations)
    after 2 blocks, the same payment delivers: HTTP 200
 
-demo complete: identity, signed payment, settlement, reconciliation, replay rejection, and the mandate lifecycle (grant, pay, ask and confirm, revoke, deferred delivery)
+== 14. Provision: eligibility registry, RWA asset, and the DvP contract ==
+   eligibility 0xHEX, asset 0xHEX, dvp 0xHEX
+   delegator 0xHEX is eligible and sponsors the agent; seller 0xHEX holds 10 tRWA
+
+== 15. Refuse: an ineligible payer is turned away before settlement ==
+   HTTP 402, errorCode "payer_not_eligible" (the agent's sponsored eligibility was withdrawn)
+   sponsorship restored: the agent is eligible again
+
+== 16. Deliver atomically: DvP settles payment and delivery in one transaction ==
+   settlement tx: 0xHEX (payment and delivery together)
+   agent: 96000 tKRW / 1 tRWA, seller: 500 tKRW / 9 tRWA
+
+== 17. Receipt: the gateway signs the settlement ==
+   settlement tx 0xHEX, mandate 0xHEX
+   signed for delegator 0xHEX, payer 0xHEX
+
+== 18. Audit: verify the receipt offline, then confirm settlement on chain ==
+   [PASS] receipt signature: signed by 0xHEX
+   [PASS] mandate delegation chain: delegator 0xHEX, agent 0xHEX
+   [PASS] revocation status: no revocation before the receipt was issued
+   [PASS] payment within mandate scope: amount, payee, and resource are within scope
+   [PASS] settlement on chain: settlement tx 0xHEX status 1
+   [PASS] asset delivery on chain: asset delivered within the settlement transaction
+demo complete: identity, signed payment, settlement, reconciliation, replay rejection, the mandate lifecycle (grant, pay, ask and confirm, revoke, deferred delivery), eligibility-gated DvP delivery, a signed receipt, and an offline audit
