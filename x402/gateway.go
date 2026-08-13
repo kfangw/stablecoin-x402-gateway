@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strings"
@@ -59,6 +60,10 @@ type Gateway struct {
 	// is a receipt-only key, never used for chain transactions, so a keyless
 	// gateway can still issue receipts. When nil no receipt is produced.
 	ReceiptKey *ecdsa.PrivateKey
+
+	// Logger, when set, receives structured events (settlements, refusals,
+	// delivery, refunds, sessions). Nil keeps the gateway silent, unchanged.
+	Logger *slog.Logger
 
 	// Commit is called by the local facilitator right after a settlement
 	// transaction is submitted. On a simulated backend it mines a block;
@@ -155,6 +160,20 @@ func (g *Gateway) timeout() time.Duration {
 		return 60 * time.Second
 	}
 	return g.Timeout
+}
+
+// logInfo and logWarn emit a structured event when a logger is set, and are
+// no-ops otherwise, so the library stays silent unless a caller opts in.
+func (g *Gateway) logInfo(msg string, args ...any) {
+	if g.Logger != nil {
+		g.Logger.Info(msg, args...)
+	}
+}
+
+func (g *Gateway) logWarn(msg string, args ...any) {
+	if g.Logger != nil {
+		g.Logger.Warn(msg, args...)
+	}
 }
 
 // policy returns the configured accept policy, defaulting to AlwaysVerify.
@@ -503,8 +522,15 @@ func decodeHex32(s string) ([32]byte, error) {
 
 // refusal builds the 402 failure for a non-approval decision. It falls back to
 // the outcome's default code and the facilitator's reason when the policy left
-// either empty.
+// either empty. It also logs the refusal code.
 func (g *Gateway) refusal(d Decision, pc PaymentContext, vr *VerifyResult) *failure {
+	defer func() {
+		code := d.Code
+		if code == "" {
+			code = codeForAction(d.Action)
+		}
+		g.logInfo("payment refused", "code", code)
+	}()
 	code := d.Code
 	if code == "" {
 		code = codeForAction(d.Action)
@@ -574,6 +600,7 @@ func (g *Gateway) settle(ctx context.Context, p PaymentPayload, reqs PaymentRequ
 	// Log the settled decision so mandate accounting can be rebuilt from the
 	// journal: this payment's spend is now committed.
 	g.recordDecision(pc, Decision{Action: ActionApprove}, true)
+	g.logInfo("settlement", "payer", record.Payer.Hex(), "amount", record.Amount.String(), "tx", record.TxHash.Hex())
 	return record, nil
 }
 
@@ -632,6 +659,7 @@ func (g *Gateway) deliver(ctx context.Context, record SettlementRecord) (Settlem
 		return g.refund(ctx, record, err)
 	}
 	record.DeliveryTx = txHash
+	g.logInfo("delivery", "payer", record.Payer.Hex(), "tx", txHash.Hex())
 	return record, nil
 }
 
@@ -653,6 +681,7 @@ func (g *Gateway) refund(ctx context.Context, record SettlementRecord, deliverEr
 			}
 		}
 		g.journalRefund(record, refundTx)
+		g.logWarn("delivery failed, refunded", "payer", record.Payer.Hex(), "settlement", settled, "refund", refundTx.Hex())
 		return SettlementRecord{}, &failure{
 			Code:   ErrCodeDeliveryFailed,
 			Reason: fmt.Sprintf("settled in %s, delivery failed (%v); refunded in %s", settled, deliverErr, refundTx.Hex()),
@@ -660,6 +689,7 @@ func (g *Gateway) refund(ctx context.Context, record SettlementRecord, deliverEr
 	}
 	// Keyless gateway: it cannot move funds, so the refund is recorded as pending.
 	g.journalRefundPending(record)
+	g.logWarn("delivery failed, refund pending", "payer", record.Payer.Hex(), "settlement", settled)
 	return SettlementRecord{}, &failure{
 		Code:   ErrCodeDeliveryFailed,
 		Reason: fmt.Sprintf("settled in %s, delivery failed (%v); refund pending (gateway holds no key to refund)", settled, deliverErr),

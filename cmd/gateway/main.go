@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"os"
@@ -209,8 +210,14 @@ func run() error {
 	if *facilitatorURL != "" {
 		mode = "remote facilitator " + *facilitatorURL
 	}
-	log.Printf("x402 gateway on %s (%s): token %s, price %s tKRW, payTo %s, network %s",
-		*listen, mode, gw.Token.Address.Hex(), gw.Price, gw.PayTo.Hex(), gw.Network)
+
+	// Structured logging: the gateway logs settlements, refusals, delivery,
+	// refunds, and sessions through this logger.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	gw.Logger = logger
+	logger.Info("gateway starting",
+		"listen", *listen, "mode", mode, "token", gw.Token.Address.Hex(),
+		"price", gw.Price.String(), "payTo", gw.PayTo.Hex(), "network", gw.Network)
 
 	return serve(server)
 }

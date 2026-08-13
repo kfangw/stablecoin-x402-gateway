@@ -136,6 +136,7 @@ func (g *Gateway) openSession(w http.ResponseWriter, r *http.Request, next http.
 		validBefore: auth.ValidBefore.Int64(),
 	}
 	g.sessions().put(id, sess)
+	g.logInfo("session opened", "id", id, "payer", auth.From.Hex(), "budget", sess.budget.String())
 	w.Header().Set(HeaderPaymentSession, id)
 	next.ServeHTTP(w, r)
 }
@@ -237,6 +238,7 @@ func (g *Gateway) settleSession(ctx context.Context, sess *paymentSession) (Sett
 		}
 	}
 	sess.settled = true
+	g.logInfo("session settled", "payer", sess.payer.Hex(), "budget", sess.budget.String(), "spent", sess.spent.String(), "tx", record.TxHash.Hex())
 	return record, nil
 }
 

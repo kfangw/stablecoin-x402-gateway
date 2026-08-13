@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"os"
@@ -78,15 +79,15 @@ func run() error {
 		log.Printf("dvp settlement on: contract %s, asset amount %d", *dvpAddr, *assetAmount)
 	}
 	network := fmt.Sprintf("eip155:%s", chainID)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/verify", verifyHandler(fac))
-	mux.HandleFunc("/settle", settleHandler(fac))
+	mux.HandleFunc("/verify", verifyHandler(fac, logger))
+	mux.HandleFunc("/settle", settleHandler(fac, logger))
 	mux.HandleFunc("/supported", supportedHandler(network))
 
 	server := &http.Server{Addr: *listen, Handler: mux}
-	log.Printf("x402 facilitator on %s: token %s, settler %s, network %s",
-		*listen, tok.Address.Hex(), facAddr.Hex(), network)
+	logger.Info("facilitator starting", "listen", *listen, "token", tok.Address.Hex(), "settler", facAddr.Hex(), "network", network)
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -109,7 +110,7 @@ func run() error {
 	return server.Shutdown(shutdownCtx)
 }
 
-func verifyHandler(fac *x402.LocalFacilitator) http.HandlerFunc {
+func verifyHandler(fac *x402.LocalFacilitator, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -126,12 +127,12 @@ func verifyHandler(fac *x402.LocalFacilitator) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("verify: %v", err), http.StatusInternalServerError)
 			return
 		}
-		log.Printf("verify: isValid=%v payer=%s reason=%q", result.IsValid, result.Payer, result.InvalidReason)
+		logger.Info("verify", "isValid", result.IsValid, "payer", result.Payer, "reason", result.InvalidReason)
 		writeJSON(w, result)
 	}
 }
 
-func settleHandler(fac *x402.LocalFacilitator) http.HandlerFunc {
+func settleHandler(fac *x402.LocalFacilitator, logger *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -147,7 +148,7 @@ func settleHandler(fac *x402.LocalFacilitator) http.HandlerFunc {
 			http.Error(w, fmt.Sprintf("settle: %v", err), http.StatusInternalServerError)
 			return
 		}
-		log.Printf("settle: success=%v tx=%s payer=%s reason=%q", resp.Success, resp.Transaction, resp.Payer, resp.ErrorReason)
+		logger.Info("settle", "success", resp.Success, "tx", resp.Transaction, "payer", resp.Payer, "reason", resp.ErrorReason)
 		writeJSON(w, resp)
 	}
 }
