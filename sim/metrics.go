@@ -20,6 +20,9 @@ type Report struct {
 	AttackLoss      int64  `json:"attackLoss"`
 	Escalations     int    `json:"escalations"`
 	Refused         int    `json:"refused"`
+	// RewoundDeliveries counts deferred deliveries a replayed chain trace rolled
+	// back at the run's confirm depth. Zero without a trace.
+	RewoundDeliveries int `json:"rewoundDeliveries"`
 }
 
 func rate(num, den int) float64 {
@@ -43,12 +46,12 @@ func (r Report) AttacksBlockedRate() float64 {
 func Render(reports []Report) string {
 	var b strings.Builder
 	w := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "policy\tpayments\tsettled\tbenign done\tattacks thru\tattack loss\tescalations")
+	fmt.Fprintln(w, "policy\tpayments\tsettled\tbenign done\tattacks thru\tattack loss\tescalations\trewound")
 	for _, r := range reports {
-		fmt.Fprintf(w, "%s\t%d\t%d\t%d/%d (%.0f%%)\t%d/%d\t%d\t%d\n",
+		fmt.Fprintf(w, "%s\t%d\t%d\t%d/%d (%.0f%%)\t%d/%d\t%d\t%d\t%d\n",
 			r.Label, r.Payments, r.Settled,
 			r.BenignCompleted, r.BenignTotal, r.BenignCompletionRate()*100,
-			r.AttacksSettled, r.AttackTotal, r.AttackLoss, r.Escalations)
+			r.AttacksSettled, r.AttackTotal, r.AttackLoss, r.Escalations, r.RewoundDeliveries)
 	}
 	w.Flush()
 	return b.String()

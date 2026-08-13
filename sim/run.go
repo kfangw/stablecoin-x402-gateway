@@ -31,7 +31,8 @@ type Config struct {
 	Grant        x402.GrantPolicy // agent grant policy; nil pays everything
 	Mandate      *x402.Mandate    // signed for the agent if set (Delegator/Agent filled in)
 	ConfirmDepth uint64
-	Responder    *Responder // answers confirmation asks; nil never confirms
+	Responder    *Responder  // answers confirmation asks; nil never confirms
+	ChainTrace   *ChainTrace // replays observed rewinds against deferred deliveries; nil disables
 }
 
 // spoofPayee is a fixed address outside any mandate, used by the payee-spoof
@@ -122,8 +123,10 @@ func Run(cfg Config) (Report, error) {
 	}
 
 	rep := Report{Label: cfg.Label}
+	deferredSeen := 0
 	h := harness{sim: sim, agent: agent, url: url, confirmDepth: cfg.ConfirmDepth,
-		delegatorKey: delegatorKey, chainID: chainID, responder: cfg.Responder}
+		delegatorKey: delegatorKey, chainID: chainID, responder: cfg.Responder,
+		trace: cfg.ChainTrace, deferred: &deferredSeen}
 	for _, item := range Workload(cfg.Seed, cfg.Payments, cfg.AttackMix) {
 		rep.Payments++
 		if item.Kind == Benign {
@@ -161,6 +164,8 @@ type harness struct {
 	delegatorKey *ecdsa.PrivateKey
 	chainID      *big.Int
 	responder    *Responder
+	trace        *ChainTrace
+	deferred     *int // counts deferred deliveries, for the chain-trace replay
 }
 
 // attempt runs one payment through the stack and reports whether it settled and
@@ -179,6 +184,14 @@ func (h harness) attempt(item WorkItem, rep *Report) bool {
 	case result.ErrorCode == x402.ErrCodePaymentDeferred:
 		for i := uint64(0); i < h.confirmDepth; i++ {
 			h.sim.Commit()
+		}
+		// Replay the observed chain history: a delivery at this confirm depth may
+		// be rolled back by a rewind, in which case it is not delivered.
+		k := *h.deferred
+		*h.deferred++
+		if h.trace != nil && h.trace.deliveryRewound(k, h.confirmDepth) {
+			rep.RewoundDeliveries++
+			return false
 		}
 		delivered, err := h.agent.Retry(h.url)
 		return err == nil && delivered.StatusCode == http.StatusOK

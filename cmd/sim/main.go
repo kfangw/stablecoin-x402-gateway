@@ -43,6 +43,7 @@ type options struct {
 	acceptTable      string
 	grantTable       string
 	compare          multiFlag
+	chainTrace       *sim.ChainTrace
 }
 
 func run() error {
@@ -58,8 +59,17 @@ func run() error {
 	fs.StringVar(&o.grantTable, "grant-table", "", "grant decision-table JSON file")
 	fs.Var(&o.compare, "compare", "extra 'label=accept.json:grant.json' table pair to compare (repeatable)")
 	replay := fs.String("replay", "", "replay a gateway journal's logged decisions against an alternative --accept-table instead of generating a workload")
+	chainTrace := fs.String("chain-trace", "", "chainprofile trace JSON; replays observed rewinds against deferred deliveries")
 	out := fs.String("out", "", "write the reports as JSON to this file")
 	fs.Parse(os.Args[1:])
+
+	if *chainTrace != "" {
+		t, err := sim.LoadChainTrace(*chainTrace)
+		if err != nil {
+			return err
+		}
+		o.chainTrace = t
+	}
 
 	// Replay mode and the workload generator are mutually exclusive.
 	if *replay != "" {
@@ -121,6 +131,7 @@ func (o options) base(label string) sim.Config {
 		AttackMix:    o.attackMix,
 		ConfirmDepth: o.confirmDepth,
 		Responder:    o.responder(),
+		ChainTrace:   o.chainTrace,
 	}
 }
 
