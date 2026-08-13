@@ -179,3 +179,50 @@ func addr(b byte) common.Address {
 	a[19] = b
 	return a
 }
+
+// Kafka record values are journal entries; parseEventRecords decodes them and
+// skips anything malformed.
+func TestParseEventRecords(t *testing.T) {
+	revocation, _ := json.Marshal(x402.JournalEntry{
+		Kind:       "revocation",
+		At:         900,
+		Revocation: &x402.RevocationRecord{MandateID: "0xdead", Delegator: "0x01"},
+	})
+	settlement, _ := json.Marshal(x402.JournalEntry{ID: "0xabc", TxHash: "0xabc"})
+	values := [][]byte{revocation, []byte("{not json"), settlement}
+
+	entries := parseEventRecords(values)
+	if len(entries) != 2 {
+		t.Fatalf("parsed %d entries, want 2 (garbage skipped)", len(entries))
+	}
+	if entries[0].Kind != "revocation" || entries[0].Revocation == nil {
+		t.Errorf("first entry = %+v, want a revocation", entries[0])
+	}
+}
+
+// The revocation check works off the events slice, which is what the Kafka
+// consumer produces, so the same timing rule holds for the streamed source.
+func TestAuditRevocationFromEvents(t *testing.T) {
+	var mid [32]byte
+	mid[0] = 0x5a
+	receipt := x402.Receipt{MandateID: mid, IssuedAt: 1000}
+	events := []x402.JournalEntry{{
+		Kind:       "revocation",
+		At:         900, // before the receipt was issued
+		Revocation: &x402.RevocationRecord{MandateID: "0x" + hex.EncodeToString(mid[:])},
+	}}
+
+	a := &auditor{}
+	auditRevocation(a, receipt, events, true)
+	if !a.failed {
+		t.Fatal("a revocation before issuance in the stream must fail the audit")
+	}
+
+	// The same revocation after issuance passes.
+	events[0].At = 1100
+	b := &auditor{}
+	auditRevocation(b, receipt, events, true)
+	if b.failed {
+		t.Fatal("a revocation after issuance must not fail the audit")
+	}
+}

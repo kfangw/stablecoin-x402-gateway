@@ -11,15 +11,18 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math/big"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/x402"
@@ -49,12 +52,17 @@ func (a *auditor) step(name string, ok bool, detail string) {
 func (a *auditor) skip(name, detail string) { fmt.Printf("[SKIP] %s: %s\n", name, detail) }
 
 func run(args []string) error {
-	receiptFile, mandateFile, journalFile, rpc, gatewayAddr, err := parseFlags(args)
+	opts, err := parseFlags(args)
 	if err != nil {
 		return err
 	}
 
-	receipt, sig, err := loadReceipt(receiptFile)
+	receipt, sig, err := loadReceipt(opts.receiptFile)
+	if err != nil {
+		return err
+	}
+	// Revocation and settlement events come from a journal file or a Kafka topic.
+	events, haveEvents, err := loadEvents(opts)
 	if err != nil {
 		return err
 	}
@@ -62,22 +70,22 @@ func run(args []string) error {
 
 	// Step 1: the receipt is signed by the gateway.
 	signer, err := x402.VerifyReceipt(receipt, sig)
-	ok := err == nil && (gatewayAddr == "" || signer == common.HexToAddress(gatewayAddr))
+	ok := err == nil && (opts.gatewayAddr == "" || signer == common.HexToAddress(opts.gatewayAddr))
 	a.step("receipt signature", ok, fmt.Sprintf("signed by %s", signer.Hex()))
 
 	// Steps 2 to 4 concern the mandate. A receipt with no mandate skips them.
 	if receipt.MandateID == ([32]byte{}) {
 		a.skip("mandate", "receipt carries no mandate")
 	} else {
-		if err := auditMandate(a, receipt, mandateFile, journalFile); err != nil {
+		if err := auditMandate(a, receipt, opts.mandateFile, events, haveEvents); err != nil {
 			return err
 		}
 	}
 
 	// Step 5: on-chain settlement and delivery, when an RPC endpoint is given.
-	if rpc == "" {
+	if opts.rpc == "" {
 		a.skip("on-chain settlement", "no --rpc; offline audit only")
-	} else if err := auditOnChain(a, receipt, rpc); err != nil {
+	} else if err := auditOnChain(a, receipt, opts.rpc); err != nil {
 		return err
 	}
 
@@ -88,7 +96,7 @@ func run(args []string) error {
 	return nil
 }
 
-func auditMandate(a *auditor, receipt x402.Receipt, mandateFile, journalFile string) error {
+func auditMandate(a *auditor, receipt x402.Receipt, mandateFile string, events []x402.JournalEntry, haveEvents bool) error {
 	if mandateFile == "" {
 		return fmt.Errorf("the receipt names a mandate; --mandate is required")
 	}
@@ -108,7 +116,7 @@ func auditMandate(a *auditor, receipt x402.Receipt, mandateFile, journalFile str
 	a.step("mandate delegation chain", bind, fmt.Sprintf("delegator %s, agent %s", delegator.Hex(), m.Agent.Hex()))
 
 	// Step 3: the mandate was not revoked before the receipt was issued.
-	auditRevocation(a, receipt, journalFile)
+	auditRevocation(a, receipt, events, haveEvents)
 
 	// Step 4: the payment stayed within the mandate's scope.
 	scopeErr := m.WithinScope(receipt.PayTo, receipt.Resource, receipt.Amount)
@@ -116,14 +124,9 @@ func auditMandate(a *auditor, receipt x402.Receipt, mandateFile, journalFile str
 	return nil
 }
 
-func auditRevocation(a *auditor, receipt x402.Receipt, journalFile string) {
-	if journalFile == "" {
-		a.skip("revocation status", "no --journal; cannot check revocations")
-		return
-	}
-	events, err := loadJournalEvents(journalFile)
-	if err != nil {
-		a.step("revocation status", false, fmt.Sprintf("read events: %v", err))
+func auditRevocation(a *auditor, receipt x402.Receipt, events []x402.JournalEntry, haveEvents bool) {
+	if !haveEvents {
+		a.skip("revocation status", "no event source (--journal or --broker); cannot check revocations")
 		return
 	}
 	mandateHex := "0x" + hex.EncodeToString(receipt.MandateID[:])
@@ -204,21 +207,56 @@ func scopeDetail(err error) string {
 
 // ---- inputs ----
 
-func parseFlags(args []string) (receipt, mandate, journal, rpc, gateway string, err error) {
+type options struct {
+	receiptFile string
+	mandateFile string
+	journalFile string
+	brokers     []string
+	topic       string
+	rpc         string
+	gatewayAddr string
+}
+
+func parseFlags(args []string) (options, error) {
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
 	r := fs.String("receipt", "", "signed receipt JSON (required)")
 	m := fs.String("mandate", "", "signed mandate JSON (required if the receipt names a mandate)")
 	j := fs.String("journal", "", "journal file with revocation events")
+	broker := fs.String("broker", "", "comma-separated Kafka brokers to read revocation/settlement events from")
+	topic := fs.String("topic", "settlements", "Kafka topic to read (with --broker)")
 	rp := fs.String("rpc", "", "RPC endpoint; when set, the settlement and delivery are verified on chain")
 	g := fs.String("gateway", "", "expected receipt signing address; when set, step 1 checks the recovered signer")
-	if err = fs.Parse(args); err != nil {
-		return
+	if err := fs.Parse(args); err != nil {
+		return options{}, err
 	}
 	if *r == "" {
-		err = fmt.Errorf("--receipt is required")
-		return
+		return options{}, fmt.Errorf("--receipt is required")
 	}
-	return *r, *m, *j, *rp, *g, nil
+	o := options{receiptFile: *r, mandateFile: *m, journalFile: *j, topic: *topic, rpc: *rp, gatewayAddr: *g}
+	if *broker != "" {
+		o.brokers = strings.Split(*broker, ",")
+	}
+	return o, nil
+}
+
+// loadEvents reads revocation and settlement events from the configured source:
+// a Kafka topic when brokers are given, otherwise a journal file. The bool
+// reports whether a source was configured at all.
+func loadEvents(o options) ([]x402.JournalEntry, bool, error) {
+	switch {
+	case len(o.brokers) > 0:
+		events, err := readKafkaEvents(o.brokers, o.topic)
+		return events, true, err
+	case o.journalFile != "":
+		j, err := x402.Open(o.journalFile)
+		if err != nil {
+			return nil, true, err
+		}
+		defer j.Close()
+		return j.Entries(), true, nil
+	default:
+		return nil, false, nil
+	}
 }
 
 func loadReceipt(path string) (x402.Receipt, []byte, error) {
@@ -261,14 +299,63 @@ func loadMandate(path string) (x402.Mandate, []byte, error) {
 	return m, sig, nil
 }
 
-// loadJournalEvents reads the journal file's entries.
-func loadJournalEvents(path string) ([]x402.JournalEntry, error) {
-	j, err := x402.Open(path)
-	if err != nil {
-		return nil, err
+// readKafkaEvents reads the topic from the beginning to what is currently
+// available, using the same franz-go client the outbox publishes with. The
+// values are journal entries, so an auditor can reconstruct revocation and
+// settlement history from the stream alone.
+func readKafkaEvents(brokers []string, topic string) ([]x402.JournalEntry, error) {
+	if topic == "" {
+		return nil, fmt.Errorf("--topic is required with --broker")
 	}
-	defer j.Close()
-	return j.Entries(), nil
+	cl, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ConsumeTopics(topic),
+		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("kafka: %w", err)
+	}
+	defer cl.Close()
+
+	var values [][]byte
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		fetches := cl.PollFetches(ctx)
+		cancel()
+		if errs := fetches.Errors(); len(errs) > 0 {
+			// A deadline with no records means the stream is drained; any other
+			// error is real.
+			for _, e := range errs {
+				if !errors.Is(e.Err, context.DeadlineExceeded) {
+					return nil, fmt.Errorf("kafka fetch: %w", e.Err)
+				}
+			}
+			break
+		}
+		n := 0
+		fetches.EachRecord(func(r *kgo.Record) {
+			values = append(values, r.Value)
+			n++
+		})
+		if n == 0 {
+			break
+		}
+	}
+	return parseEventRecords(values), nil
+}
+
+// parseEventRecords unmarshals journal entries from Kafka record values, skipping
+// any that do not parse.
+func parseEventRecords(values [][]byte) []x402.JournalEntry {
+	out := make([]x402.JournalEntry, 0, len(values))
+	for _, v := range values {
+		var e x402.JournalEntry
+		if err := json.Unmarshal(v, &e); err != nil {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 func chainIDOf(network string) (*big.Int, error) {
