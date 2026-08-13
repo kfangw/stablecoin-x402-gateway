@@ -18,6 +18,7 @@ import (
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/ledger"
 	"github.com/kfangw/stablecoin-x402-gateway/registry"
+	"github.com/kfangw/stablecoin-x402-gateway/reserve"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 )
 
@@ -41,6 +42,10 @@ func main() {
 		err = runMint(args)
 	case "reconcile":
 		err = runReconcile(args)
+	case "reserve-add":
+		err = runReserve(args, +1)
+	case "reserve-sub":
+		err = runReserve(args, -1)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -61,8 +66,10 @@ func usage() {
 commands:
   deploy           deploy the tKRW token (deployer becomes the issuer)
   deploy-registry  deploy the identity registry
-  mint             mint tKRW to an account
-  reconcile        reconcile the off-chain ledger against the node
+  mint             mint tKRW to an account (--reserve caps minting at the reserve total)
+  reconcile        reconcile the off-chain ledger against the node (--reserve adds the reserve invariant)
+  reserve-add      record a reserve deposit
+  reserve-sub      record a reserve withdrawal
 
 the issuer key is read from the `+issuerKeyEnv+` environment variable.
 `)
@@ -138,6 +145,7 @@ func runMint(args []string) error {
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
 	to := fs.String("to", "", "recipient address (required)")
 	amount := fs.String("amount", "", "amount to mint in tKRW (required)")
+	reservePath := fs.String("reserve", "", "reserve ledger file; when set, minting is capped at the reserve total")
 	fs.Parse(args)
 
 	if err := requireHexAddress("token", *tokenAddr); err != nil {
@@ -165,6 +173,25 @@ func runMint(args []string) error {
 
 	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
 	recipient := common.HexToAddress(*to)
+
+	// Bound minting by the off-chain reserve: the supply after minting must not
+	// exceed the reserve total.
+	if *reservePath != "" {
+		rl, err := reserve.Open(*reservePath)
+		if err != nil {
+			return err
+		}
+		defer rl.Close()
+		supply, err := tok.TotalSupply()
+		if err != nil {
+			return fmt.Errorf("totalSupply: %w", err)
+		}
+		after := new(big.Int).Add(supply, value)
+		if after.Cmp(rl.Total()) > 0 {
+			return fmt.Errorf("mint refused: supply %s + %s = %s exceeds reserve total %s", supply, value, after, rl.Total())
+		}
+	}
+
 	tx, err := tok.Mint(opts, recipient, value)
 	if err != nil {
 		return fmt.Errorf("mint: %w", err)
@@ -185,6 +212,7 @@ func runReconcile(args []string) error {
 	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
 	tokenAddr := fs.String("token", "", "tKRW token address (required)")
 	assetAddr := fs.String("asset", "", "RWA asset token address; when set, the asset holdings ledger is reconciled too")
+	reservePath := fs.String("reserve", "", "reserve ledger file; when set, checks that the ledger supply does not exceed the reserve total")
 	fs.Parse(args)
 
 	if err := requireHexAddress("token", *tokenAddr); err != nil {
@@ -204,16 +232,36 @@ func runReconcile(args []string) error {
 	defer client.Close()
 
 	tok := token.Bind(common.HexToAddress(*tokenAddr), client)
-	ok := reconcileOne(ctx, "tKRW", ledger.New(tok.Address, tok, client))
+	tkrwRep, ok := reconcileOne(ctx, "tKRW", ledger.New(tok.Address, tok, client))
 
 	// The asset holdings ledger reuses the same infrastructure: the asset shares
 	// tKRW's Transfer event shape, so the same three-way reconciliation applies.
 	if *assetAddr != "" {
 		ast := asset.Bind(common.HexToAddress(*assetAddr), client)
-		if !reconcileOne(ctx, "tRWA", ledger.New(ast.Address, ast, client)) {
+		if _, aok := reconcileOne(ctx, "tRWA", ledger.New(ast.Address, ast, client)); !aok {
 			ok = false
 		}
 	}
+
+	// Reserve invariant: the on-chain supply must not exceed the off-chain
+	// reserve total. This is an issuer-level combination; the reserve is an
+	// off-chain fact, kept out of the ledger package's on-chain reconciliation.
+	if *reservePath != "" && tkrwRep != nil {
+		rl, err := reserve.Open(*reservePath)
+		if err != nil {
+			return err
+		}
+		defer rl.Close()
+		total := rl.Total()
+		fmt.Printf("[reserve] reserve total %s, ledger supply %s\n", total, tkrwRep.LedgerSupply)
+		if tkrwRep.LedgerSupply.Cmp(total) > 0 {
+			fmt.Println("[reserve] invariant violated: ledger supply exceeds the reserve total")
+			ok = false
+		} else {
+			fmt.Println("[reserve] invariant holds: ledger supply is within the reserve")
+		}
+	}
+
 	if !ok {
 		os.Exit(1)
 	}
@@ -221,25 +269,56 @@ func runReconcile(args []string) error {
 }
 
 // reconcileOne runs one ledger's reconciliation and prints a labelled report. It
-// returns whether the ledger matched the chain.
-func reconcileOne(ctx context.Context, name string, led *ledger.Ledger) bool {
+// returns the report (nil on error) and whether the ledger matched the chain.
+func reconcileOne(ctx context.Context, name string, led *ledger.Ledger) (*ledger.Report, bool) {
 	rep, err := led.Reconcile(ctx)
 	if err != nil {
 		fmt.Printf("%s: reconcile error: %v\n", name, err)
-		return false
+		return nil, false
 	}
 	fmt.Printf("[%s] %d events, %d accounts\n", name, rep.Events, rep.Accounts)
 	fmt.Printf("[%s] minted %s - burned %s = ledger supply %s\n", name, rep.Minted, rep.Burned, rep.LedgerSupply)
 	fmt.Printf("[%s] on-chain totalSupply %s, sum of balances %s\n", name, rep.OnChainSupply, rep.SumBalances)
 	if rep.OK() {
 		fmt.Printf("[%s] reconciliation passed: the ledger matches the chain\n", name)
-		return true
+		return &rep, true
 	}
 	fmt.Printf("[%s] reconciliation mismatches:\n", name)
 	for _, m := range rep.Mismatches {
 		fmt.Println(" -", m)
 	}
-	return false
+	return &rep, false
+}
+
+// runReserve records a reserve movement: a deposit (add) or a withdrawal (sub).
+func runReserve(args []string, sign int64) error {
+	fs := flag.NewFlagSet("reserve", flag.ExitOnError)
+	reservePath := fs.String("reserve", "", "reserve ledger file (required)")
+	amount := fs.String("amount", "", "amount to move in tKRW (required, positive)")
+	reason := fs.String("reason", "", "why the reserve moved")
+	fs.Parse(args)
+
+	if *reservePath == "" {
+		return fmt.Errorf("--reserve is required")
+	}
+	value, ok := new(big.Int).SetString(*amount, 10)
+	if !ok || value.Sign() <= 0 {
+		return fmt.Errorf("invalid --amount %q (must be a positive integer)", *amount)
+	}
+	if sign < 0 {
+		value = new(big.Int).Neg(value)
+	}
+
+	rl, err := reserve.Open(*reservePath)
+	if err != nil {
+		return err
+	}
+	defer rl.Close()
+	if err := rl.Append(value, *reason); err != nil {
+		return err
+	}
+	fmt.Printf("reserve moved by %s, total now %s\n", value, rl.Total())
+	return nil
 }
 
 func requireHexAddress(flagName, value string) error {
