@@ -1,10 +1,23 @@
 # Roadmap
 
-Feature checklist of stablecoin-x402-gateway. The repository stays a flow-verification demo; every item is scoped to that purpose. Check items off as they land.
+The repository's destination was one end-to-end scenario: a registered agent
+buys a mock RWA token over x402, within a delegated mandate, with the whole
+chain of delegation, payment, settlement, and delivery auditable by a third
+party. The repository stays a flow-verification demo, and every item was scoped to that purpose. That scenario is implemented; the Delivered section keeps the record of
+how it was built, and the exploratory items below are what remains open.
 
-The unchecked items below build toward one end-to-end scenario: a registered agent buys a mock RWA token over x402, within a delegated mandate, with the whole chain of delegation, payment, settlement, and delivery auditable by a third party. Milestones M1 through M4 mark the order.
+## Exploratory
 
-## Core
+- [ ] Validator economics: stake-backed validation with contract-level slashing tied to a validation registry
+- [ ] Evaluation harness: mock settlement and on-chain settlement swappable behind the existing backend seam, with metrics for manipulation resistance and settlement integrity
+- [ ] On-chain verifier as an accept policy: execution evidence checked on chain against a user-signed specification
+- [ ] Payer bonds: a per-payment bond posted by the agent and forfeited on detected misuse, available to accept policies as a required action, with a minimal check that bond capital is separate from mandate funds
+- [ ] Batched micro-escrow: escrow with a challenge period amortized across batches of small payments, as a fair-exchange counterpart to the settle-first flow
+- [ ] Permissioned-chain profile (Besu QBFT or OP Stack devnet) for the full STO-style testbed
+
+## Delivered
+
+### Core
 
 - [x] tKRW contract: ERC-20 with issuer-only mint/burn, Pausable, two-step issuer handover, and EIP-3009 `transferWithAuthorization` as the gasless settlement path (`contracts/`)
 - [x] Go contract bindings without abigen, with the EIP-712 domain separator always read from the chain (`token/`)
@@ -15,18 +28,18 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] One-command end-to-end demo on an in-process simulated chain (`cmd/demo/`)
 - [x] Tests across all layers: replay, forged-signature and expiry rejection, missed-event detection in reconciliation, delegation-limit enforcement
 
-## Real node mode
+### Real node mode
 
 - [x] Standalone binaries for the three roles: `cmd/issuer` (deploy, mint, reconcile), `cmd/gateway`, `cmd/agent`
 - [x] RPC connection helpers with chain ID discovery and environment-variable key loading (`internal/nodeutil/`)
 - [x] End-to-end test against a live RPC node, skipped unless `E2E_RPC_URL` is set
 
-## Deployment
+### Deployment
 
 - [x] Docker Compose stack: anvil, one-shot issuance init, the facilitator, and a keyless gateway with `docker compose up`; the agent as a one-shot run
 - [x] x402 facilitator API: verify and settle split into a separate service following the public facilitator interface, leaving the gateway free of chain access and keys in remote mode
 
-## Agent identity — M1
+### Agent identity (M1)
 
 - [x] Composable policy chain with a five-outcome decision type (approve, reject, defer and re-evaluate, ask the delegator, require a bond), so identity, mandate, and verification checks stack without touching the gateway core and richer policies can land later without breaking the interface
 - [x] Minimal ERC-8004-style identity registry contract for local runs, behind the same interface as the deployed public registries
@@ -34,7 +47,7 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] `register` command in the agent CLI: register the agent address and agent-card URL
 - [x] Machine-readable error codes in 402 responses alongside human-readable messages, including the identity requirement
 
-## Delegation and mandates — M2
+### Delegation and mandates (M2)
 
 - [x] Pluggable accept-policy hook in the gateway, with the default policy reproducing the fixed always-verify rule
 - [x] AP2-style mandates: user-signed delegations (limit, expiry, allowed payees and resources) carried with the payment and verified by the gateway, making the agent's spending authority checkable by the counterparty
@@ -53,7 +66,7 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] Payment sessions: one authorization covering many requests, settled periodically
 - [x] Resource discovery endpoint listing paid resources
 
-## Asset delivery — M3
+### Asset delivery (M3)
 
 - [x] Mock RWA token contract; the gateway delivers the asset to the payer after settlement (two-transaction flow)
 - [x] Refund path for the two-transaction flow: a delivery failure after settlement produces a recorded refund transfer instead of a silent loss
@@ -62,7 +75,7 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] Freeze and allowlist controls on tKRW reflecting regulatory requirements
 - [x] Asset-holdings ledger reconciled against the chain like the issuance ledger
 
-## Auditability and reserves — M4
+### Auditability and reserves (M4)
 
 - [x] Signed settlement receipts: the gateway signs a receipt linking the mandate, the settlement transaction, and invoice fields, so the delegation-to-delivery chain verifies offline
 - [x] Audit command: verifies a receipt offline end to end, from the mandate signature and its revocation status to the settlement transaction and the asset delivery, and can consume published settlement events as its input
@@ -75,7 +88,7 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] Architecture diagram in the README
 - [x] Trust assumptions in the README: what each party could forge, steal, or censor, and which check stops it
 
-## Operations and consistency
+### Operations and consistency
 
 - [x] Continuous integration: gofmt, `go vet`, build and tests on every push, the e2e suite against anvil, and a Docker build check
 - [x] Incremental ledger indexing from the last processed block, keeping the full rescan as the verification path
@@ -88,12 +101,3 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 - [x] Static analysis of the contract in CI
 - [x] x402 conformance checker: a command that probes a 402 endpoint with replays, concurrent requests, cross-resource signatures, and injected settlement failures, and reports violations of one-payment-one-resource and related invariants; runs against this gateway in CI
 - [x] Chain risk profiling: per-depth confirmation failure and rollback rates measured from observed chain history, with recorded traces replayable in the simulation harness
-
-## Beyond M4 (exploratory)
-
-- [ ] Validator economics: stake-backed validation with contract-level slashing tied to a validation registry
-- [ ] Evaluation harness: mock settlement and on-chain settlement swappable behind the existing backend seam, with metrics for manipulation resistance and settlement integrity
-- [ ] On-chain verifier as an accept policy: execution evidence checked on chain against a user-signed specification
-- [ ] Payer bonds: a per-payment bond posted by the agent and forfeited on detected misuse, available to accept policies as a required action, with a minimal check that bond capital is separate from mandate funds
-- [ ] Batched micro-escrow: escrow with a challenge period amortized across batches of small payments, as a fair-exchange counterpart to the settle-first flow
-- [ ] Permissioned-chain profile (Besu QBFT or OP Stack devnet) for the full STO-style testbed
