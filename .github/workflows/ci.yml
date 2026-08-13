@@ -36,6 +36,12 @@ jobs:
         run: go build ./...
       - name: go test
         run: go test ./...
+      - name: fuzz (short)
+        # A short run of each fuzz target so parser regressions surface in CI.
+        run: |
+          for target in FuzzDecodeHeader FuzzParseExactPayload FuzzMandateJSON; do
+            go test ./x402/ -run '^$' -fuzz "^${target}$" -fuzztime 30s
+          done
 
   # End-to-end against a real node. Independent of the test job (no needs:), so
   # they run in parallel.
