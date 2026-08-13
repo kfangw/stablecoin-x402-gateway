@@ -219,6 +219,20 @@ func TestResetRestarts(t *testing.T) {
 	}
 }
 
+// The embedded UI must make no external requests, so the demo works offline and
+// the repo carries no frontend build chain.
+func TestIndexHasNoExternalRequests(t *testing.T) {
+	html := string(indexHTML)
+	for _, bad := range []string{"http://", "https://", "//cdn", "src=\"//"} {
+		if strings.Contains(html, bad) {
+			t.Errorf("index.html references an external resource (%q)", bad)
+		}
+	}
+	if !strings.Contains(html, "EventSource(\"/events\")") {
+		t.Error("index.html should stream from the relative /events endpoint")
+	}
+}
+
 func TestHealthzAndIndex(t *testing.T) {
 	h := newHub(false, time.Second)
 	srv := httptest.NewServer(h.handler())

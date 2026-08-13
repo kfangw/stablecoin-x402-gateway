@@ -4,8 +4,350 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>x402 gateway demo</title>
+<style>
+  /* Light theme only; dark mode is out of scope. Five color roles. */
+  :root {
+    --bg: #f5f6f8;
+    --text: #1c2230;
+    --accent: #2b6cb0;
+    --success: #2f855a;
+    --failure: #c53030;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid #d9dde3;
+    background: #fff;
+  }
+  header h1 { margin: 0 0 4px; font-size: 18px; }
+  header p { margin: 0; font-size: 13px; color: #55606f; }
+
+  #progress {
+    display: flex;
+    gap: 4px;
+    padding: 12px 20px;
+    background: #fff;
+    border-bottom: 1px solid #d9dde3;
+    flex-wrap: wrap;
+  }
+  .cell {
+    width: 30px; height: 26px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px;
+    border-radius: 4px;
+    background: #e6e9ee;
+    color: #7a8494;
+    transition: background 0.25s, color 0.25s;
+  }
+  .cell.done { background: #cfe0f0; color: var(--accent); }
+  .cell.active { background: var(--accent); color: #fff; font-weight: 600; }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 16px 20px;
+    align-items: start;
+  }
+  #panels { display: flex; flex-direction: column; gap: 12px; }
+  .panel {
+    background: #fff;
+    border: 1px solid #d9dde3;
+    border-radius: 8px;
+    padding: 12px 14px;
+    transition: border-color 0.25s, box-shadow 0.25s;
+  }
+  .panel.active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px rgba(43, 108, 176, 0.18);
+  }
+  .panel h2 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #55606f;
+  }
+  .row { display: flex; justify-content: space-between; font-size: 14px; padding: 2px 0; }
+  .row .k { color: #55606f; }
+  .row .v { font-variant-numeric: tabular-nums; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+  .badge {
+    display: inline-block;
+    margin-top: 6px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    background: #f0d5d5;
+    color: var(--failure);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .badge.hidden { display: none; }
+  .status-active { color: var(--success); }
+  .status-revoked { color: var(--failure); }
+
+  ul.audit { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  ul.audit li { padding: 3px 0; }
+  ul.audit .mark { font-weight: 700; margin-right: 6px; }
+  ul.audit .pass { color: var(--success); }
+  ul.audit .fail { color: var(--failure); }
+
+  #log {
+    background: #10151f;
+    color: #d6dde8;
+    border-radius: 8px;
+    padding: 12px 14px;
+    height: 70vh;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+
+  footer {
+    position: sticky;
+    bottom: 0;
+    display: flex;
+    gap: 10px;
+    padding: 12px 20px;
+    background: #fff;
+    border-top: 1px solid #d9dde3;
+  }
+  button {
+    font-size: 14px;
+    padding: 8px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+  }
+  button.secondary { background: #fff; color: var(--accent); }
+  button:active { transform: translateY(1px); }
+</style>
 </head>
 <body>
-<p>The browser demo UI is served here. Connect to /events for the stream and POST /control to drive it.</p>
+<header>
+  <h1>x402 gateway demo</h1>
+  <p id="subtitle">Press Start, then Next to step through the run. Auto plays it on a timer; Reset restarts.</p>
+</header>
+
+<div id="progress"></div>
+
+<main>
+  <div id="panels">
+    <div class="panel" id="panel-delegator">
+      <h2>Delegator</h2>
+      <div class="row"><span class="k">Mandate</span><span class="v mono" id="mandate-id">none</span></div>
+      <div class="row"><span class="k">Status</span><span class="v" id="mandate-status">no mandate</span></div>
+      <span class="badge hidden" id="badge-delegator"></span>
+    </div>
+    <div class="panel" id="panel-agent">
+      <h2>Agent</h2>
+      <div class="row"><span class="k">tKRW</span><span class="v" id="agent-tkrw">-</span></div>
+      <div class="row"><span class="k">tRWA</span><span class="v" id="agent-trwa">-</span></div>
+      <span class="badge hidden" id="badge-agent"></span>
+    </div>
+    <div class="panel" id="panel-gateway">
+      <h2>Gateway</h2>
+      <div class="row"><span class="k">Role</span><span class="v">verify, then settle</span></div>
+      <span class="badge hidden" id="badge-gateway"></span>
+    </div>
+    <div class="panel" id="panel-chain">
+      <h2>Facilitator + Chain</h2>
+      <div class="row"><span class="k">payTo tKRW</span><span class="v" id="payto-tkrw">-</span></div>
+      <div class="row"><span class="k">seller tRWA</span><span class="v" id="seller-trwa">-</span></div>
+      <div class="row"><span class="k">Last tx</span><span class="v mono" id="last-tx">-</span></div>
+      <span class="badge hidden" id="badge-chain"></span>
+    </div>
+    <div class="panel" id="panel-auditor">
+      <h2>Auditor</h2>
+      <ul class="audit" id="audit-list"></ul>
+    </div>
+  </div>
+
+  <div id="log"></div>
+</main>
+
+<footer>
+  <button id="btn-start">Start</button>
+  <button id="btn-next" class="secondary">Next</button>
+  <button id="btn-auto" class="secondary">Auto</button>
+  <button id="btn-reset" class="secondary">Reset</button>
+</footer>
+
+<script>
+  var TOTAL_STEPS = 18;
+
+  // Which panel each step lights up, for a brief highlight.
+  var STEP_PANEL = {
+    1: "chain", 2: "gateway", 3: "agent", 4: "agent", 5: "agent",
+    6: "gateway", 7: "chain", 8: "gateway", 9: "delegator", 10: "agent",
+    11: "delegator", 12: "delegator", 13: "chain", 14: "chain", 15: "agent",
+    16: "chain", 17: "gateway", 18: "auditor"
+  };
+
+  // Which panel an error code belongs to.
+  var ERROR_PANEL = {
+    identity_unregistered: "agent",
+    payer_not_eligible: "agent",
+    confirmation_required: "delegator",
+    mandate_revoked: "delegator",
+    payment_deferred: "chain"
+  };
+
+  var progress = document.getElementById("progress");
+  var cells = [];
+  function buildProgress() {
+    progress.innerHTML = "";
+    cells = [];
+    for (var i = 1; i <= TOTAL_STEPS; i++) {
+      var c = document.createElement("div");
+      c.className = "cell";
+      c.textContent = i;
+      progress.appendChild(c);
+      cells.push(c);
+    }
+  }
+
+  function shorten(hex) {
+    if (!hex || hex.length < 14) return hex || "-";
+    return hex.slice(0, 10) + "…" + hex.slice(-6);
+  }
+
+  function highlight(panelId) {
+    var panels = document.querySelectorAll(".panel");
+    for (var i = 0; i < panels.length; i++) panels[i].classList.remove("active");
+    if (panelId) {
+      var el = document.getElementById("panel-" + panelId);
+      if (el) el.classList.add("active");
+    }
+  }
+
+  function setBadge(panel, code) {
+    var b = document.getElementById("badge-" + panel);
+    if (!b) return;
+    b.textContent = code;
+    b.classList.remove("hidden");
+  }
+
+  function appendLog(text) {
+    if (!text) return;
+    var log = document.getElementById("log");
+    log.appendChild(document.createTextNode(text));
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function applyBalances(bal) {
+    if (!bal) return;
+    if (bal["agent tKRW"] !== undefined) document.getElementById("agent-tkrw").textContent = bal["agent tKRW"];
+    if (bal["agent tRWA"] !== undefined) document.getElementById("agent-trwa").textContent = bal["agent tRWA"];
+    if (bal["payTo tKRW"] !== undefined) document.getElementById("payto-tkrw").textContent = bal["payTo tKRW"];
+    if (bal["seller tKRW"] !== undefined) document.getElementById("payto-tkrw").textContent = bal["seller tKRW"];
+    if (bal["seller tRWA"] !== undefined) document.getElementById("seller-trwa").textContent = bal["seller tRWA"];
+  }
+
+  function reset() {
+    buildProgress();
+    highlight(null);
+    document.getElementById("agent-tkrw").textContent = "-";
+    document.getElementById("agent-trwa").textContent = "-";
+    document.getElementById("payto-tkrw").textContent = "-";
+    document.getElementById("seller-trwa").textContent = "-";
+    document.getElementById("last-tx").textContent = "-";
+    document.getElementById("mandate-id").textContent = "none";
+    document.getElementById("mandate-status").textContent = "no mandate";
+    document.getElementById("mandate-status").className = "v";
+    document.getElementById("audit-list").innerHTML = "";
+    var badges = document.querySelectorAll(".badge");
+    for (var i = 0; i < badges.length; i++) badges[i].classList.add("hidden");
+    document.getElementById("log").textContent = "";
+  }
+
+  function handle(e) {
+    switch (e.kind) {
+      case "reset":
+        reset();
+        return;
+      case "step":
+        var n = e.step;
+        for (var i = 0; i < cells.length; i++) {
+          cells[i].classList.remove("active");
+          if (i + 1 < n) cells[i].classList.add("done");
+        }
+        if (n >= 1 && n <= cells.length) cells[n - 1].classList.add("active");
+        highlight(STEP_PANEL[n]);
+        appendLog(e.text);
+        return;
+      case "balance":
+        applyBalances(e.balances);
+        appendLog(e.text);
+        return;
+      case "tx":
+        if (e.txHash) document.getElementById("last-tx").textContent = shorten(e.txHash);
+        appendLog(e.text);
+        return;
+      case "error":
+        if (e.errorCode) setBadge(ERROR_PANEL[e.errorCode] || "gateway", e.errorCode);
+        if (e.errorCode === "mandate_revoked") {
+          var s = document.getElementById("mandate-status");
+          s.textContent = "revoked";
+          s.className = "v status-revoked";
+        }
+        appendLog(e.text);
+        return;
+      case "audit":
+        var li = document.createElement("li");
+        var mark = document.createElement("span");
+        mark.className = "mark " + (e.auditOk ? "pass" : "fail");
+        mark.textContent = e.auditOk ? "PASS" : "FAIL";
+        li.appendChild(mark);
+        li.appendChild(document.createTextNode(e.auditStep));
+        document.getElementById("audit-list").appendChild(li);
+        appendLog(e.text);
+        return;
+      case "done":
+        highlight(null);
+        appendLog(e.text);
+        return;
+      default:
+        // log and other kinds
+        if (e.mandateId) {
+          document.getElementById("mandate-id").textContent = shorten(e.mandateId);
+          var st = document.getElementById("mandate-status");
+          st.textContent = "active";
+          st.className = "v status-active";
+        }
+        appendLog(e.text);
+    }
+  }
+
+  function send(action) {
+    fetch("/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: action })
+    });
+  }
+
+  document.getElementById("btn-start").addEventListener("click", function () { send("start"); });
+  document.getElementById("btn-next").addEventListener("click", function () { send("next"); });
+  document.getElementById("btn-auto").addEventListener("click", function () { send("auto"); });
+  document.getElementById("btn-reset").addEventListener("click", function () { send("reset"); });
+
+  buildProgress();
+  var es = new EventSource("/events");
+  es.onmessage = function (m) {
+    try { handle(JSON.parse(m.data)); } catch (err) { /* ignore malformed frame */ }
+  };
+</script>
 </body>
 </html>
