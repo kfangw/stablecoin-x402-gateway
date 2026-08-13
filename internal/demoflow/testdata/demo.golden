@@ -1,0 +1,50 @@
+== 1. Issuance: deploy tKRW and mint ==
+   contract: 0xHEX (issuer: 0xHEX)
+   minted 100000 tKRW to agent wallet 0xHEX (agent ETH balance: 0)
+
+   identity registry: 0xHEX
+
+== 2. Gateway: protect a paid resource, require a registered agent ==
+   price 500 tKRW, payTo 0xHEX
+
+== 3. Identity: an unregistered agent is refused ==
+   HTTP 402, errorCode "identity_unregistered" (agent not yet registered)
+
+== 4. Register the agent ==
+   registered agent 0xHEX (tx 0xHEX)
+
+== 5. Agent: read the 402 response and pay by signature ==
+   HTTP 200, paid 500 tKRW
+   response body: {"report":"market report body","paid":true}
+   settlement tx: 0xHEX
+
+== 6. Settlement check: balances ==
+   agent balance: 99500 tKRW / payTo balance: 500 tKRW
+
+== 7. Ledger reconciliation: off-chain ledger vs on-chain state ==
+   2 events, 2 accounts
+   minted 100000 - burned 0 = ledger supply 100000
+   on-chain totalSupply 100000, sum of balances 100000
+   reconciliation passed: the ledger matches the chain
+
+== 8. Replay check: resend the same signature ==
+   reused X-PAYMENT header: HTTP 402 (402 expected: nonce already used)
+
+== 9. Delegation: the gateway now also requires a signed mandate ==
+   delegator 0xHEX signed mandate 0xHEX for the agent
+
+== 10. Agent pays under the mandate ==
+   HTTP 200, paid 500 tKRW under the mandate
+
+== 11. A payment beyond the mandate asks the delegator ==
+   HTTP 402, errorCode "confirmation_required" (500 tKRW over the 100 per-payment limit)
+   after the delegator confirmed: HTTP 200, paid 500 tKRW
+
+== 12. Revocation: the delegator withdraws the mandate ==
+   HTTP 402, errorCode "mandate_revoked" (the mandate no longer authorizes payment)
+
+== 13. A large payment is delivered only after confirmations ==
+   HTTP 402, errorCode "payment_deferred" (settled, delivery held for 2 confirmations)
+   after 2 blocks, the same payment delivers: HTTP 200
+
+demo complete: identity, signed payment, settlement, reconciliation, replay rejection, and the mandate lifecycle (grant, pay, ask and confirm, revoke, deferred delivery)
