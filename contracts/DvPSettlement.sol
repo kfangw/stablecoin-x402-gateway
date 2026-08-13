@@ -75,7 +75,13 @@ contract DvPSettlement {
             "dvp: payment forward failed"
         );
         // 3. Delivery: pull the asset from the seller to the buyer. The seller
-        //    must have approved this contract for at least assetAmount.
+        //    must have approved this contract for at least assetAmount. Slither's
+        //    arbitrary-send-erc20 detector flags this pull because `from` is not
+        //    msg.sender, but it is not arbitrary here: the seller's own approval
+        //    gates it, and it runs atomically with the buyer's signed payment
+        //    received in step 1, so it only ever moves an approved seller's asset
+        //    to the buyer who just paid for it.
+        // slither-disable-next-line arbitrary-send-erc20
         require(
             IAssetToken(assetToken).transferFrom(seller, from, assetAmount),
             "dvp: asset delivery failed"
