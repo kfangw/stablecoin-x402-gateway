@@ -109,6 +109,22 @@ func NewNonce() ([32]byte, error) {
 	return n, nil
 }
 
+// BoundNonce derives an authorization nonce from a random seed and the resource
+// being paid for: keccak256(seed || keccak256(resource)). The seed keeps nonces
+// unique across payments, and the resource term binds the signature to one
+// resource, so reusing the signature for a different resource of the same price
+// yields a different required nonce and is rejected. No contract change is
+// needed: the derived value is still an ordinary 32-byte nonce.
+func BoundNonce(seed [32]byte, resource string) [32]byte {
+	resourceHash := crypto.Keccak256([]byte(resource))
+	buf := make([]byte, 0, 64)
+	buf = append(buf, seed[:]...)
+	buf = append(buf, resourceHash...)
+	var out [32]byte
+	copy(out[:], crypto.Keccak256(buf))
+	return out
+}
+
 // SignAuthorization produces a 65-byte signature (R||S||V, V in {27,28}) over
 // the transfer authorization.
 func (w *Wallet) SignAuthorization(domainSeparator [32]byte, a Authorization) ([]byte, error) {

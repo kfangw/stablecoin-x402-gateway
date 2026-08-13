@@ -2,11 +2,13 @@ package x402
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"math/big"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/kfangw/stablecoin-x402-gateway/token"
+	"github.com/kfangw/stablecoin-x402-gateway/wallet"
 )
 
 // Backend is the minimal interface needed to wait for settlement transactions.
@@ -45,6 +48,11 @@ type Gateway struct {
 	// advertises it in the payment terms so the agent signs a receive
 	// authorization to the contract rather than a transfer to the seller.
 	DvPAddress common.Address
+
+	// RequireBoundNonce, when true, rejects a payment whose authorization nonce is
+	// not bound to the resource (a missing seed, or a seed that does not recompute
+	// the nonce). Off by default, so payments without a seed stay accepted.
+	RequireBoundNonce bool
 
 	// Commit is called by the local facilitator right after a settlement
 	// transaction is submitted. On a simulated backend it mines a block;
@@ -281,6 +289,12 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 		return g.resumeDeferred(ctx, p, reqs, nonce, df)
 	}
 
+	// Resource binding: a fresh payment's nonce must be bound to this resource, so
+	// a signature cannot be reused for a different resource of the same price.
+	if fail := g.checkResourceBinding(p, reqs); fail != nil {
+		return SettlementRecord{}, fail
+	}
+
 	vr, err := g.facilitator().Verify(ctx, p, reqs)
 	if err != nil {
 		return SettlementRecord{}, &failure{Code: ErrCodeVerificationError, Reason: fmt.Sprintf("verification error: %v", err)}
@@ -302,6 +316,47 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	default:
 		return SettlementRecord{}, g.refusal(d, pc, vr)
 	}
+}
+
+// checkResourceBinding confirms a fresh payment's nonce is derived from its
+// carried seed and this resource. A payload without a seed passes unless the
+// gateway requires binding.
+func (g *Gateway) checkResourceBinding(p PaymentPayload, reqs PaymentRequirements) *failure {
+	// A confirmed payment reuses the confirmed nonce and is already bound to its
+	// resource by the confirmation's own signature, so the seed check does not
+	// apply.
+	if p.Confirmation != nil {
+		return nil
+	}
+	seedHex := p.Payload.NonceSeed
+	if seedHex == "" {
+		if g.RequireBoundNonce {
+			return &failure{Code: ErrCodeNonceUnbound, Reason: "payment is not bound to the resource: no nonce seed"}
+		}
+		return nil
+	}
+	seed, err := decodeHex32(seedHex)
+	if err != nil {
+		return &failure{Code: ErrCodeNonceUnbound, Reason: "invalid nonce seed"}
+	}
+	nonce, ok := payloadNonce(p)
+	if !ok {
+		return &failure{Code: ErrCodeNonceUnbound, Reason: "unreadable authorization nonce"}
+	}
+	if wallet.BoundNonce(seed, reqs.Resource) != nonce {
+		return &failure{Code: ErrCodeNonceUnbound, Reason: "authorization nonce is not bound to this resource"}
+	}
+	return nil
+}
+
+func decodeHex32(s string) ([32]byte, error) {
+	var out [32]byte
+	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	if err != nil || len(b) != 32 {
+		return out, fmt.Errorf("expected 32-byte hex")
+	}
+	copy(out[:], b)
+	return out, nil
 }
 
 // refusal builds the 402 failure for a non-approval decision. It falls back to

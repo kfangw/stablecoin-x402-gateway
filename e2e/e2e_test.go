@@ -92,13 +92,14 @@ func TestE2EAgainstRealNode(t *testing.T) {
 	// Gateway: Commit nil, so WaitMined polls the node for the receipt.
 	const price = 500
 	gw := &x402.Gateway{
-		Token:      tok,
-		Backend:    client,
-		Transactor: gatewayOpts,
-		PayTo:      gatewayAddr,
-		Price:      big.NewInt(price),
-		Network:    fmt.Sprintf("eip155:%s", chainID),
-		Commit:     nil,
+		Token:             tok,
+		Backend:           client,
+		Transactor:        gatewayOpts,
+		PayTo:             gatewayAddr,
+		Price:             big.NewInt(price),
+		Network:           fmt.Sprintf("eip155:%s", chainID),
+		RequireBoundNonce: true,
+		Commit:            nil,
 	}
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"report":"market report body","paid":true}`)
@@ -206,14 +207,15 @@ func TestE2EIdentityAgainstRealNode(t *testing.T) {
 	}
 
 	gw := &x402.Gateway{
-		Token:      tok,
-		Backend:    client,
-		Transactor: gatewayOpts,
-		PayTo:      gatewayAddr,
-		Price:      big.NewInt(500),
-		Network:    fmt.Sprintf("eip155:%s", chainID),
-		Commit:     nil,
-		Policy:     x402.Chain{x402.AlwaysVerify{}, x402.IdentityPolicy{Registry: reg}},
+		Token:             tok,
+		Backend:           client,
+		Transactor:        gatewayOpts,
+		PayTo:             gatewayAddr,
+		Price:             big.NewInt(500),
+		Network:           fmt.Sprintf("eip155:%s", chainID),
+		RequireBoundNonce: true,
+		Commit:            nil,
+		Policy:            x402.Chain{x402.AlwaysVerify{}, x402.IdentityPolicy{Registry: reg}},
 	}
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"report":"market report body","paid":true}`)
@@ -298,13 +300,14 @@ func TestE2EMandateAgainstRealNode(t *testing.T) {
 	}
 
 	gw := &x402.Gateway{
-		Token:      tok,
-		Backend:    client,
-		Transactor: gatewayOpts,
-		PayTo:      gatewayAddr,
-		Price:      big.NewInt(500),
-		Network:    fmt.Sprintf("eip155:%s", chainID),
-		Policy:     x402.Chain{x402.AlwaysVerify{}, x402.NewMandatePolicy(chainID)},
+		Token:             tok,
+		Backend:           client,
+		Transactor:        gatewayOpts,
+		PayTo:             gatewayAddr,
+		Price:             big.NewInt(500),
+		Network:           fmt.Sprintf("eip155:%s", chainID),
+		RequireBoundNonce: true,
+		Policy:            x402.Chain{x402.AlwaysVerify{}, x402.NewMandatePolicy(chainID)},
 	}
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"report":"market report body","paid":true}`)
@@ -394,14 +397,15 @@ func mandateGatewayFor(t *testing.T, ctx context.Context, client *ethclient.Clie
 	}
 
 	gw := &x402.Gateway{
-		Token:        tok,
-		Backend:      client,
-		Transactor:   gatewayOpts,
-		PayTo:        gatewayAddr,
-		Price:        big.NewInt(500),
-		Network:      fmt.Sprintf("eip155:%s", chainID),
-		Policy:       x402.Chain{x402.AlwaysVerify{}, mp},
-		ConfirmDepth: confirmDepth,
+		Token:             tok,
+		Backend:           client,
+		Transactor:        gatewayOpts,
+		PayTo:             gatewayAddr,
+		Price:             big.NewInt(500),
+		Network:           fmt.Sprintf("eip155:%s", chainID),
+		RequireBoundNonce: true,
+		Policy:            x402.Chain{x402.AlwaysVerify{}, mp},
+		ConfirmDepth:      confirmDepth,
 	}
 	resource := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"report":"market report body","paid":true}`)

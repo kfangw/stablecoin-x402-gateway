@@ -87,6 +87,12 @@ func (g *Gateway) openSession(w http.ResponseWriter, r *http.Request, next http.
 	ctx := r.Context()
 	reqs := g.Requirements(resource)
 
+	// The session-open authorization is bound to this resource, like any payment.
+	if fail := g.checkResourceBinding(p, reqs); fail != nil {
+		g.writeRequirements(w, resource, fail)
+		return
+	}
+
 	vr, err := g.facilitator().Verify(ctx, p, reqs)
 	if err != nil {
 		g.writeRequirements(w, resource, &failure{Code: ErrCodeVerificationError, Reason: fmt.Sprintf("verification error: %v", err)})

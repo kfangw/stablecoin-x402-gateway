@@ -292,10 +292,11 @@ const sessionValiditySeconds = 3600
 
 // buildSessionOpen builds a full-budget authorization marked as a session open.
 func (a *Agent) buildSessionOpen(req PaymentRequirements, budget *big.Int) (string, error) {
-	nonce, err := wallet.NewNonce()
+	seed, err := wallet.NewNonce()
 	if err != nil {
 		return "", err
 	}
+	nonce := wallet.BoundNonce(seed, req.Resource)
 	auth := wallet.Authorization{
 		From:        a.Wallet.Address,
 		To:          hexAddress(req.PayTo),
@@ -316,6 +317,7 @@ func (a *Agent) buildSessionOpen(req PaymentRequirements, budget *big.Int) (stri
 		Session:     &SessionRequest{Open: true},
 		Payload: ExactPayload{
 			Signature: "0x" + hex.EncodeToString(sig),
+			NonceSeed: "0x" + hex.EncodeToString(seed[:]),
 			Authorization: AuthorizationJSON{
 				From:        auth.From.Hex(),
 				To:          auth.To.Hex(),
@@ -352,7 +354,7 @@ func (a *Agent) Discover(resourcesURL string) (*DiscoveryResponse, error) {
 // buildPayment builds an EIP-3009 authorization matching the payment terms,
 // signs it, and encodes it as a header value.
 func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, error) {
-	nonce, err := a.paymentNonce()
+	nonce, seedHex, err := a.boundNonce(req.Resource)
 	if err != nil {
 		return "", err
 	}
@@ -393,6 +395,7 @@ func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, 
 		Confirmation: a.Confirmation,
 		Payload: ExactPayload{
 			Signature: "0x" + hex.EncodeToString(sig),
+			NonceSeed: seedHex,
 			Authorization: AuthorizationJSON{
 				From:        auth.From.Hex(),
 				To:          auth.To.Hex(),
@@ -403,6 +406,21 @@ func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, 
 			},
 		},
 	})
+}
+
+// boundNonce derives the authorization nonce for a resource and returns the seed
+// it committed to (hex). With a confirmation attached the nonce is fixed to the
+// confirmed one, so it is left unbound and the seed is empty.
+func (a *Agent) boundNonce(resource string) ([32]byte, string, error) {
+	if a.Confirmation != nil {
+		n, err := a.paymentNonce()
+		return n, "", err
+	}
+	seed, err := wallet.NewNonce()
+	if err != nil {
+		return [32]byte{}, "", err
+	}
+	return wallet.BoundNonce(seed, resource), "0x" + hex.EncodeToString(seed[:]), nil
 }
 
 // paymentNonce returns a fresh random nonce, unless a confirmation is attached,

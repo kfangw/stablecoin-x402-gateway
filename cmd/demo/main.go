@@ -117,6 +117,8 @@ func run() error {
 		Commit:     func() { sim.Commit() },
 		// Verify first, then require the payer to be a registered agent.
 		Policy: x402.Chain{x402.AlwaysVerify{}, x402.IdentityPolicy{Registry: reg}},
+		// Require each authorization to be bound to the resource it pays for.
+		RequireBoundNonce: true,
 	}
 	report := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

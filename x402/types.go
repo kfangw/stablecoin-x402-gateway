@@ -70,6 +70,11 @@ type AuthorizationJSON struct {
 type ExactPayload struct {
 	Signature     string            `json:"signature"` // 0x + 65-byte hex
 	Authorization AuthorizationJSON `json:"authorization"`
+	// NonceSeed, when set, is the 0x-hex 32-byte seed the authorization nonce was
+	// derived from as keccak256(seed || keccak256(resource)). It lets the gateway
+	// recompute the nonce and confirm the signature is bound to this resource. It
+	// is additive: a payload without it stays wire-compatible.
+	NonceSeed string `json:"nonceSeed,omitempty"`
 }
 
 // PaymentPayload is the full payload carried base64-encoded in the X-PAYMENT header.

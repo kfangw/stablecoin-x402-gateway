@@ -60,6 +60,7 @@ func run() error {
 	assetAmount := fs.Int64("asset-amount", 1, "units of the asset delivered per payment")
 	dvpAddr := fs.String("dvp", "", "DvP settlement contract address; when set, payment and delivery settle atomically (local mode)")
 	sessions := fs.Bool("sessions", false, "enable payment sessions: one authorization covering many requests, settled at close (local mode)")
+	requireBoundNonce := fs.Bool("require-bound-nonce", false, "reject payments whose authorization nonce is not bound to the resource")
 	listen := fs.String("listen", ":8402", "listen address")
 	price := fs.Int64("price", 500, "resource price in tKRW")
 	payToFlag := fs.String("pay-to", "", "payee address (default: the GATEWAY_KEY address; required with --facilitator-url)")
@@ -97,6 +98,7 @@ func run() error {
 	if cleanup != nil {
 		defer cleanup()
 	}
+	gw.RequireBoundNonce = *requireBoundNonce
 
 	// Optional identity policy: reject payments from unregistered agents. The
 	// lookup is read-only, so the remote-mode gateway stays keyless; it only
