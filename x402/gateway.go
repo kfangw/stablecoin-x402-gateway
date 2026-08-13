@@ -2,6 +2,7 @@ package x402
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -53,6 +54,11 @@ type Gateway struct {
 	// not bound to the resource (a missing seed, or a seed that does not recompute
 	// the nonce). Off by default, so payments without a seed stay accepted.
 	RequireBoundNonce bool
+
+	// ReceiptKey, when set, signs a settlement receipt after each settlement. It
+	// is a receipt-only key, never used for chain transactions, so a keyless
+	// gateway can still issue receipts. When nil no receipt is produced.
+	ReceiptKey *ecdsa.PrivateKey
 
 	// Commit is called by the local facilitator right after a settlement
 	// transaction is submitted. On a simulated backend it mines a block;
@@ -220,6 +226,9 @@ func (g *Gateway) Middleware(next http.Handler) http.Handler {
 		if record.DeliveryTx != (common.Hash{}) {
 			resp.DeliveryTransaction = record.DeliveryTx.Hex()
 		}
+		if g.ReceiptKey != nil {
+			resp.Receipt = g.issueReceipt(record, g.Requirements(resource), header)
+		}
 		settleHeader, err := EncodeHeader(resp)
 		if err == nil {
 			w.Header().Set(HeaderPaymentResponse, settleHeader)
@@ -316,6 +325,64 @@ func (g *Gateway) verifyAndSettle(ctx context.Context, header string, reqs Payme
 	default:
 		return SettlementRecord{}, g.refusal(d, pc, vr)
 	}
+}
+
+// issueReceipt signs a settlement receipt linking the delegation chain and
+// journals it. It reads the mandate id and delegator from the payment, so the
+// receipt ties the mandate to the settlement and any delivery under one
+// signature. A signing error is logged and drops the receipt without failing
+// the settled request.
+func (g *Gateway) issueReceipt(record SettlementRecord, reqs PaymentRequirements, header string) *SignedReceiptJSON {
+	var p PaymentPayload
+	_ = DecodeHeader(header, &p)
+	var mandateID [32]byte
+	var delegator common.Address
+	if p.Mandate != nil {
+		if m, err := p.Mandate.Mandate.ToMandate(); err == nil {
+			mandateID = m.MandateID
+			delegator = m.Delegator
+		}
+	}
+	id, err := newReceiptID()
+	if err != nil {
+		log.Printf("x402: receipt id: %v", err)
+		return nil
+	}
+	r := Receipt{
+		ReceiptID:    id,
+		Network:      g.Network,
+		Resource:     reqs.Resource,
+		Payer:        record.Payer,
+		PayTo:        g.PayTo,
+		Amount:       record.Amount,
+		SettlementTx: record.TxHash,
+		DeliveryTx:   record.DeliveryTx,
+		MandateID:    mandateID,
+		Delegator:    delegator,
+		IssuedAt:     time.Now().Unix(),
+	}
+	sig, err := SignReceipt(g.ReceiptKey, r)
+	if err != nil {
+		log.Printf("x402: sign receipt: %v", err)
+		return nil
+	}
+	signed := &SignedReceiptJSON{Receipt: r.ToJSON(), Signature: "0x" + hex.EncodeToString(sig)}
+	if g.Journal != nil {
+		entry := JournalEntry{
+			ID:      "0x" + hex.EncodeToString(id[:]),
+			Payer:   record.Payer.Hex(),
+			Amount:  bigString(record.Amount),
+			TxHash:  record.TxHash.Hex(),
+			Network: g.Network,
+			At:      r.IssuedAt,
+			Kind:    "receipt",
+			Receipt: signed,
+		}
+		if err := g.Journal.Append(entry); err != nil {
+			log.Printf("x402: journal receipt: %v", err)
+		}
+	}
+	return signed
 }
 
 // checkResourceBinding confirms a fresh payment's nonce is derived from its

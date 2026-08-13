@@ -115,6 +115,9 @@ type SettlementResponse struct {
 	// two-transaction flow, set when the gateway delivered the asset after
 	// settlement. It is omitted when no delivery was performed.
 	DeliveryTransaction string `json:"deliveryTransaction,omitempty"`
+	// Receipt is the gateway's signed settlement receipt, set when the gateway
+	// has a receipt key. It is omitted otherwise.
+	Receipt *SignedReceiptJSON `json:"receipt,omitempty"`
 }
 
 // DiscoveryResponse lists the paid resources a gateway serves, following the

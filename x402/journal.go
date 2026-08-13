@@ -23,8 +23,12 @@ type JournalEntry struct {
 	// Kind labels the entry. An empty Kind is a settlement, kept empty so old
 	// journals replay unchanged. Other values record delivery-flow outcomes:
 	// "refund" for an executed refund transfer and "refund_pending" for a refund
-	// that could not be executed (a keyless gateway) and is left outstanding.
+	// that could not be executed (a keyless gateway) and is left outstanding, and
+	// "receipt" for a signed settlement receipt.
 	Kind string `json:"kind,omitempty"`
+	// Receipt carries the signed settlement receipt on a "receipt" entry, so an
+	// auditor can verify the delegation-to-delivery chain from the journal alone.
+	Receipt *SignedReceiptJSON `json:"receipt,omitempty"`
 }
 
 // Journal is an append-only, fsync-on-write record of settlements. Two kinds of

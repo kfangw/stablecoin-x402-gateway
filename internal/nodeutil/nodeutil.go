@@ -51,6 +51,20 @@ func TransactorFromEnv(envVar string, chainID *big.Int) (*bind.TransactOpts, com
 	return transactor(key, chainID)
 }
 
+// KeyFromEnv loads a raw private key from an environment variable, for signing
+// that is not a chain transaction (such as settlement receipts).
+func KeyFromEnv(envVar string) (*ecdsa.PrivateKey, common.Address, error) {
+	raw := strings.TrimSpace(os.Getenv(envVar))
+	if raw == "" {
+		return nil, common.Address{}, fmt.Errorf("nodeutil: environment variable %s is not set", envVar)
+	}
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(raw, "0x"))
+	if err != nil {
+		return nil, common.Address{}, fmt.Errorf("nodeutil: parse key from %s: %w", envVar, err)
+	}
+	return key, crypto.PubkeyToAddress(key.PublicKey), nil
+}
+
 func transactor(key *ecdsa.PrivateKey, chainID *big.Int) (*bind.TransactOpts, common.Address, error) {
 	opts, err := bind.NewKeyedTransactorWithChainID(key, chainID)
 	if err != nil {
