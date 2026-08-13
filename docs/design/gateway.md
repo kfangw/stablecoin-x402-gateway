@@ -22,7 +22,7 @@ Policies compose through `Chain`, which returns the first non-approval, so ident
 
 **Deferred delivery reuses the payment, not a new endpoint.** A deferred payment is followed up by resending the same authorization. The alternative, a separate polling endpoint, would have added a second wire surface and a second identity check; reusing the payment keeps the retry authenticated by construction and makes idempotency a property of the nonce. A settlement whose block falls back below the head is reported as an error, matching the ledger's refusal to silently rewrite history past finality.
 
-**State that must not corrupt is either derived or journaled.** The in-flight map and confirmation history are gateway memory and reset on restart, which is documented; the settlements themselves can be journaled before the response is sent (see [records.md](records.md)), so the caller never learns of a settlement that could be forgotten.
+**State that must not corrupt is either derived or journaled.** The settlements are journaled before the response is sent (see [records.md](records.md)), so the caller never learns of a settlement that could be forgotten. The journal also records each accept decision and mandate revocation, so a gateway with a journal rebuilds a mandate's cumulative and frequency accounting and its revocation set on startup: a restart no longer reopens a spent budget or forgets a revocation. The in-flight deferral map and the confirmation history remain gateway memory and reset on restart, which is documented.
 
 **Delivery is a second step, and its failure is recorded, not lost.** After settlement the gateway can hand the payer an asset. In the two-transaction flow (`--asset`) it transfers the asset in a separate transaction and puts the delivery transaction hash on the response; if that transfer fails, the payment has already settled, so the gateway either refunds it (a reverse tKRW transfer, journaled as `refund`) or, on a keyless gateway that cannot move funds, journals an outstanding `refund_pending`. Either way there is no silent loss, and the delivery-failed answer carries `errorCode: delivery_failed`. The atomic flow (`--dvp`) avoids the two-step gap entirely by settling and delivering in one contract call, so the gateway's separate deliverer is unused in that mode. Eligibility is checked before settlement (`EligibilityPolicy`, fail-closed, `payer_not_eligible`) precisely so a payment that delivery would only bounce never settles in the first place, an extension of the cheap-checks-first order.
 
@@ -30,7 +30,7 @@ Policies compose through `Chain`, which returns the first non-approval, so ident
 
 ## Limits
 
-The gateway serves one resource path with one price. Accounting state (in-flight deferrals, confirmation history, mandate windows) is in-memory by design at this stage. There is no authentication on the revocation endpoint beyond the delegator's signature itself, which is the point: possession of the mandate id proves nothing, the signature does.
+The gateway serves one resource path with one price. Mandate window accounting and the revocation set are rebuilt from the journal on startup; in-flight deferrals and confirmation history stay in-memory and reset on restart. There is no authentication on the revocation endpoint beyond the delegator's signature itself, which is the point: possession of the mandate id proves nothing, the signature does.
 
 ## Where to look
 

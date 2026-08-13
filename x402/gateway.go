@@ -896,4 +896,46 @@ func (g *Gateway) AttachJournal(j *Journal) {
 			Time:   time.Unix(e.At, 0),
 		})
 	}
+	g.restoreAccounting(j)
+}
+
+// restoreAccounting rebuilds mandate accounting and the revocation set from the
+// journal, so a restarted gateway resumes the cumulative and frequency windows
+// and the revocations it had before. Settled decision entries restore committed
+// spends; revocation entries restore the revocation set. Windows are applied on
+// the next evaluation, which carries the mandate, so out-of-window spends fall
+// off then.
+func (g *Gateway) restoreAccounting(j *Journal) {
+	mp, ok := g.mandatePolicy()
+	if !ok {
+		return
+	}
+	for _, e := range j.Entries() {
+		switch e.Kind {
+		case "decision":
+			d := e.Decision
+			if d == nil || !d.Settled || d.MandateID == "" {
+				continue
+			}
+			id, err := parseBytes32(d.MandateID)
+			if err != nil {
+				continue
+			}
+			amount, ok := new(big.Int).SetString(d.Amount, 10)
+			if !ok {
+				continue
+			}
+			mp.RestoreSpend(id, time.Unix(e.At, 0), amount)
+		case "revocation":
+			r := e.Revocation
+			if r == nil {
+				continue
+			}
+			id, err := parseBytes32(r.MandateID)
+			if err != nil {
+				continue
+			}
+			mp.RestoreRevocation(common.HexToAddress(r.Delegator), id)
+		}
+	}
 }

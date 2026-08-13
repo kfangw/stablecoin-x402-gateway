@@ -30,7 +30,7 @@ Revocation is a signed message over the mandate id. The gateway's `POST /mandate
 
 ## Limits
 
-Revocations, window accounting, and confirmation history live in gateway memory and reset on restart. Mandate terms are enforced by the gateway alone; enforcing the same terms in a contract, for comparison, is a ROADMAP item.
+With a journal, revocations and window accounting are rebuilt on startup from the recorded decisions and revocations, so a restart keeps a spent budget spent and a revoked mandate revoked; confirmation history stays in gateway memory and resets on restart. Mandate terms are enforced by the gateway, and the delegated-spend contract enforces the same terms on chain for comparison.
 
 ## Where to look
 

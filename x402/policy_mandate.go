@@ -68,6 +68,21 @@ func (p MandatePolicy) revoke(delegator common.Address, mandateID [32]byte) {
 	}
 }
 
+// RestoreSpend re-adds a committed spend to a mandate's accounting, so the
+// cumulative and frequency windows survive a gateway restart when replayed from
+// the journal.
+func (p MandatePolicy) RestoreSpend(mandateID [32]byte, at time.Time, amount *big.Int) {
+	if p.accounts != nil {
+		p.accounts.restore(mandateID, at, amount)
+	}
+}
+
+// RestoreRevocation re-adds a revocation to the set, rebuilding it from the
+// journal on startup.
+func (p MandatePolicy) RestoreRevocation(delegator common.Address, mandateID [32]byte) {
+	p.revoke(delegator, mandateID)
+}
+
 func (p MandatePolicy) now() time.Time {
 	if p.Now != nil {
 		return p.Now()
@@ -349,6 +364,20 @@ type mandateAccount struct {
 type mandateSpend struct {
 	at     time.Time
 	amount *big.Int
+}
+
+// restore re-adds a committed spend to an account, used to rebuild accounting
+// from the journal on startup. The window is applied later by reserve, which
+// carries the mandate, so restore needs only the timestamp and amount.
+func (a *mandateAccounts) restore(mandateID [32]byte, at time.Time, amount *big.Int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	acc := a.acct[mandateID]
+	if acc == nil {
+		acc = &mandateAccount{reserved: make(map[[32]byte]mandateSpend)}
+		a.acct[mandateID] = acc
+	}
+	acc.spends = append(acc.spends, mandateSpend{at: at, amount: new(big.Int).Set(amount)})
 }
 
 // reserve counts a payment against the windows, including other reservations,
