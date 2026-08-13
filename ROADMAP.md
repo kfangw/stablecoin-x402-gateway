@@ -64,30 +64,30 @@ The unchecked items below build toward one end-to-end scenario: a registered age
 
 ## Auditability and reserves — M4
 
-- [ ] Signed settlement receipts: the gateway signs a receipt linking the mandate, the settlement transaction, and invoice fields, so the delegation-to-delivery chain verifies offline
-- [ ] Audit command: verifies a receipt offline end to end, from the mandate signature and its revocation status to the settlement transaction and the asset delivery, and can consume published settlement events as its input
-- [ ] Decision log: a per-payment record of amount, prior risk score, policy outcomes, confirmation responses, and settlement result, extending the settlement journal so accept policies can be replayed and recalibrated offline
-- [ ] Reserve policy: minting bounded by an off-chain reserve ledger, with the reserve invariant added to reconciliation
-- [ ] Redemption flow: signature-based redemption requests settled by issuer burn
-- [ ] `receiveWithAuthorization` to close the front-running window of `transferWithAuthorization`
-- [ ] Resource binding in authorizations: tie each signed authorization to the resource it pays for, closing signature reuse across resources with the same price
-- [ ] Public testnet deployment using the deployed ERC-8004 registries, with a scripted one-command demo of the full scenario
-- [ ] Architecture diagram in the README
-- [ ] Trust assumptions in the README: what each party could forge, steal, or censor, and which check stops it
+- [x] Signed settlement receipts: the gateway signs a receipt linking the mandate, the settlement transaction, and invoice fields, so the delegation-to-delivery chain verifies offline
+- [x] Audit command: verifies a receipt offline end to end, from the mandate signature and its revocation status to the settlement transaction and the asset delivery, and can consume published settlement events as its input
+- [x] Decision log: a per-payment record of amount, prior risk score, policy outcomes, confirmation responses, and settlement result, extending the settlement journal so accept policies can be replayed and recalibrated offline
+- [x] Reserve policy: minting bounded by an off-chain reserve ledger, with the reserve invariant added to reconciliation
+- [x] Redemption flow: signature-based redemption requests settled by issuer burn
+- [x] `receiveWithAuthorization` to close the front-running window of `transferWithAuthorization`
+- [x] Resource binding in authorizations: tie each signed authorization to the resource it pays for, closing signature reuse across resources with the same price
+- [x] Public testnet deployment using the deployed ERC-8004 registries, with a scripted one-command demo of the full scenario
+- [x] Architecture diagram in the README
+- [x] Trust assumptions in the README: what each party could forge, steal, or censor, and which check stops it
 
 ## Operations and consistency
 
 - [x] Continuous integration: gofmt, `go vet`, build and tests on every push, the e2e suite against anvil, and a Docker build check
 - [x] Incremental ledger indexing from the last processed block, keeping the full rescan as the verification path
 - [x] Reorg handling in the ledger: finality depth and rollback
-- [ ] Metrics, structured logging, and health endpoints for the gateway
+- [x] Metrics, structured logging, and health endpoints for the gateway
 - [x] Durable settlement journal with an outbox pattern and crash-recovery tests
 - [x] Settlement event publishing to Kafka from the outbox
-- [ ] Gateway throughput and latency benchmarks
-- [ ] Fuzz tests for payment header parsing
-- [ ] Static analysis of the contract in CI
-- [ ] x402 conformance checker: a command that probes a 402 endpoint with replays, concurrent requests, cross-resource signatures, and injected settlement failures, and reports violations of one-payment-one-resource and related invariants; runs against this gateway in CI
-- [ ] Chain risk profiling: per-depth confirmation failure and rollback rates measured from observed chain history, with recorded traces replayable in the simulation harness
+- [x] Gateway throughput and latency benchmarks
+- [x] Fuzz tests for payment header parsing
+- [x] Static analysis of the contract in CI
+- [x] x402 conformance checker: a command that probes a 402 endpoint with replays, concurrent requests, cross-resource signatures, and injected settlement failures, and reports violations of one-payment-one-resource and related invariants; runs against this gateway in CI
+- [x] Chain risk profiling: per-depth confirmation failure and rollback rates measured from observed chain history, with recorded traces replayable in the simulation harness
 
 ## Beyond M4 (exploratory)
 
