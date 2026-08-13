@@ -289,6 +289,24 @@ func bigString(x *big.Int) string {
 }
 
 // parseBytes32 parses a 0x-prefixed 32-byte hex string.
+// WithinScope reports whether a payment to payTo for a resource at the given
+// amount falls inside this mandate's entitlements: the payee allowlist, the
+// resource prefixes, and the per-payment cap. It reuses the same checks the
+// gateway's mandate policy applies, so an offline auditor reaches the same
+// verdict. It does not check the cumulative or rate windows, which are stateful.
+func (m Mandate) WithinScope(payTo common.Address, resource string, amount *big.Int) error {
+	if len(m.AllowedPayees) > 0 && !containsAddress(m.AllowedPayees, payTo) {
+		return fmt.Errorf("payee %s is not allowed by the mandate", payTo.Hex())
+	}
+	if len(m.AllowedResources) > 0 && !prefixAllowed(m.AllowedResources, resource) {
+		return fmt.Errorf("resource %q is not allowed by the mandate", resource)
+	}
+	if m.MaxAmountPerPayment != nil && m.MaxAmountPerPayment.Sign() > 0 && amount.Cmp(m.MaxAmountPerPayment) > 0 {
+		return fmt.Errorf("amount %s exceeds the per-payment limit %s", amount, m.MaxAmountPerPayment)
+	}
+	return nil
+}
+
 func parseBytes32(s string) ([32]byte, error) {
 	var out [32]byte
 	b := common.FromHex(s)
