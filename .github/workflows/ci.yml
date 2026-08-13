@@ -82,3 +82,28 @@ jobs:
         run: docker build -t stablecoin-x402-gateway:ci .
       - name: Validate compose file
         run: docker compose config -q
+
+  # Static analysis of the Solidity contracts. Each contract is self-contained
+  # (inline interfaces, no imports), so it is analyzed on its own with the pinned
+  # compiler. --fail-high fails the job only on high-severity findings; the config
+  # excludes detectors that are noise for demo contracts: naming-convention
+  # (style), and solc-version and pragma (the compiler is pinned on purpose for
+  # the go-ethereum simulated backend, so the version warnings do not apply).
+  slither:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install slither and solc 0.8.24
+        run: |
+          pip install slither-analyzer solc-select
+          solc-select install 0.8.24
+          solc-select use 0.8.24
+      - name: Analyze contracts
+        run: |
+          for f in contracts/*.sol; do
+            echo "== $f =="
+            slither "$f" --config-file slither.config.json --fail-high
+          done
