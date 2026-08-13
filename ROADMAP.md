@@ -88,6 +88,11 @@ how it was built, and the exploratory items below are what remains open.
 - [x] Architecture diagram in the README
 - [x] Trust assumptions in the README: what each party could forge, steal, or censor, and which check stops it
 
+### Demo
+
+- [x] Single demo narrative as an event stream (`internal/demoflow`), shared by the terminal and browser demos, extended past delegation to eligibility-gated DvP delivery, a signed receipt, and an offline audit
+- [x] Browser demo (`cmd/demoweb`): the run streamed over SSE with role panels and manual or automatic step controls, self-contained with no external requests
+
 ### Operations and consistency
 
 - [x] Continuous integration: gofmt, `go vet`, build and tests on every push, the e2e suite against anvil, and a Docker build check

@@ -39,6 +39,14 @@ go test ./...
 
 The demo runs the full scenario end to end, from issuance through delegation, eligibility-gated DvP delivery, a signed receipt, and an offline audit. The same code runs against a real node with `scripts/testnet-demo.sh` (see Real node mode).
 
+To watch the same run in a browser, use `cmd/demoweb`:
+
+```bash
+go run ./cmd/demoweb   # then open http://localhost:8404
+```
+
+It serves the run over Server-Sent Events with role panels for the delegator, agent, gateway, facilitator and chain, and auditor. Start begins the run and Next steps through it one step at a time, so a presenter controls the tempo; Auto plays it on a timer and Reset restarts. Both commands share one narrative in `internal/demoflow`, so the terminal and the browser stay in step.
+
 ## Real node mode
 
 The same code runs against a real RPC node (anvil or a testnet) with the issuer,
@@ -139,7 +147,9 @@ wallet/            key management and EIP-712 signing (TransferWithAuthorization
 ledger/            token ledger indexed from Transfer events, reconciled against the chain (tKRW issuance and tRWA holdings)
 x402/              the payment protocol: gateway (server), facilitator (verify/settle, local or remote), agent (client), accept policies, delivery, refunds, and sessions
 internal/nodeutil/ RPC dial and env-key transactor helpers shared by the binaries
+internal/demoflow/ the demo narrative as an event stream, shared by cmd/demo and cmd/demoweb
 cmd/demo/          one-command demo of the whole flow on the simulated backend
+cmd/demoweb/       the same demo in a browser: SSE stream, role panels, and step controls
 cmd/issuer/        issuer CLI: deploy, deploy-registry, mint, reconcile (--asset for the holdings ledger) against a real node
 cmd/gateway/       standalone x402 gateway server (built-in or remote facilitator); flags for eligibility, delivery, DvP, sessions, discovery
 cmd/facilitator/   facilitator HTTP service: verify, settle (optionally through DvP), supported
