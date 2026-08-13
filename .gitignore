@@ -4,3 +4,19 @@ package.json
 package-lock.json
 *.test
 /dist/
+
+# binaries built at the repository root with go build
+/agent
+/audit
+/chainprofile
+/conform
+/delegator
+/demo
+/facilitator
+/gateway
+/issuer
+/sim
+
+# editor and OS files
+.DS_Store
+.idea/
