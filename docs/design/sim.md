@@ -14,6 +14,8 @@ The scripted delegator (`Responder`) answers confirmation requests with three fa
 
 The report counts payments, settlements, benign tasks completed, attacks settled and their total loss, escalations, and refusals; `Render` lays multiple reports out in one table with attack loss printed beside benign completion. `cmd/sim` compares an unprotected baseline, the built-in mandate rules, an optional primary table pair, and any number of extra table pairs given as repeatable `--compare label=accept.json:grant.json` flags, writing JSON with `--out`.
 
+Two recorded inputs can replace or shape the generated workload. `--replay <journal>` reads the decisions a gateway logged (see [records.md](records.md)), reconstructs the scalar context each policy saw, runs an alternative accept table over it, and reports the agreement rate and the approvals and rejections that flipped. `--chain-trace <file>` loads a trace recorded by `cmd/chainprofile`, which walks observed chain history and counts per-depth rewinds, and replays those rewinds against deferred deliveries so confirmation-depth settings are compared on measured rather than assumed risk.
+
 ## Design decisions
 
 **In-process, not networked.** The harness reuses the production gateway, agent, and policies verbatim on an `httptest` server and a simulated backend, so a comparison measures the policies, not a mock of them. This is the same one-code-path rule the rest of the repository follows.
@@ -26,8 +28,8 @@ The report counts payments, settlements, benign tasks completed, attacks settled
 
 ## Limits
 
-The catalog holds three attacks and one resource; it measures policy discrimination, not protocol coverage. The repeat-purchase attack is carried entirely by its risk signal at this stage. Replaying recorded decision logs and chain traces through the harness is tracked in ROADMAP.md.
+The catalog holds three attacks and one resource; it measures policy discrimination, not protocol coverage. The repeat-purchase attack is carried entirely by its risk signal at this stage. A replay reproduces the scalar context a policy read, not the full wire payload, so it compares decision rules rather than parsers or signatures.
 
 ## Where to look
 
-`sim/run.go` (stack assembly and the attempt loop), `sim/workload.go`, `sim/adversary.go`, `sim/responder.go`, `sim/metrics.go`, `cmd/sim`, example tables in `sim/testdata/`; determinism and statistics tests in `sim/run_test.go`, `sim/adversary_test.go`, `sim/responder_test.go`.
+`sim/run.go` (stack assembly and the attempt loop), `sim/workload.go`, `sim/adversary.go`, `sim/responder.go`, `sim/metrics.go`, the replay and trace loaders beside them, `cmd/sim`, `cmd/chainprofile`, example tables in `sim/testdata/`; determinism and statistics tests in `sim/run_test.go`, `sim/adversary_test.go`, `sim/responder_test.go`.

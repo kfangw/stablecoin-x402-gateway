@@ -10,7 +10,7 @@ The agent is the paying client: it reads a 402, decides whether the terms are wo
 
 The grant decision is a policy (`GrantPolicy`): pay, ask, or refuse, given the terms and the amount; the context also carries a remaining-budget field and an escalation count for policies that read them. The default `MaxAmountGrant` reproduces the original fixed rule, refusing any amount over the delegated limit. A table-driven grant (`TableGrant`) loads the same decision-table format the gateway uses. When a confirmation is attached, the agent reuses the confirmed authorization nonce, so the payment it re-signs is exactly the one the delegator approved.
 
-The `agent` CLI has two subcommands: `get` (pay for a resource, with `--mandate`, `--confirmation`, and `--grant-table`) and `register` (a one-time transaction that records the agent's address and card URL in the identity registry).
+The `agent` CLI has four subcommands: `get` (pay for a resource, with `--mandate`, `--confirmation`, and `--grant-table`, or open a payment session with `--session-budget` and draw `--session-requests` requests from it before closing), `discover` (list the gateway's paid resources from its discovery endpoint), `redeem-request` (sign a redemption request for the issuer to settle), and `register` (a one-time transaction that records the agent's address and card URL in the identity registry).
 
 ## Design decisions
 
@@ -24,7 +24,7 @@ The `agent` CLI has two subcommands: `get` (pay for a resource, with `--mandate`
 
 ## Limits
 
-The agent pays for one resource at a time and retries once; sessions that settle many requests under one authorization are a ROADMAP item. It trusts the gateway's stated terms up to its grant policy; detecting a gateway that misprices or misdirects payments is what mandates and the harness's adversaries probe.
+Outside a session the agent pays for one resource at a time and retries once. It trusts the gateway's stated terms up to its grant policy; detecting a gateway that misprices or misdirects payments is what mandates and the harness's adversaries probe.
 
 ## Where to look
 

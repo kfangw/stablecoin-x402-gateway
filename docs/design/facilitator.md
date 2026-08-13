@@ -10,6 +10,8 @@ The facilitator is the settlement executor: the one component that talks to the 
 
 Two implementations sit behind the interface. `LocalFacilitator` runs in-process against the gateway's own backend and transactor; the gateway builds it lazily when no facilitator is set, which keeps the demo and older configurations working unchanged. The remote implementation is an HTTP client for `cmd/facilitator`, a standalone service exposing `POST /verify`, `POST /settle`, and `GET /supported` in the shape of the public x402 facilitator specification: validity is a field in a 200 response, and 5xx is reserved for transport failure.
 
+When the payment terms advertise a DvP contract (`Extra["dvp"]`), both verification and settlement switch to the atomic path: the payment is expected to be a receive-style authorization whose recipient is the contract itself, and `Settle` submits `settleAndDeliver`, which collects the payment, forwards it to the seller, and delivers the asset in one transaction. The seller named in `payTo` is unchanged, so mandate payee checks still bind against the real recipient.
+
 ## Design decisions
 
 **The split follows the specification, not convenience.** The x402 model defines the facilitator as the party a resource server can delegate verification and settlement to. Reproducing that boundary exactly, rather than inventing a local variant of it, is what allows the remote-mode gateway to run keyless and lets this facilitator be swapped for a public one.
