@@ -20,10 +20,13 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/kfangw/stablecoin-x402-gateway/asset"
+	"github.com/kfangw/stablecoin-x402-gateway/dvp"
+	"github.com/kfangw/stablecoin-x402-gateway/eligibility"
 	"github.com/kfangw/stablecoin-x402-gateway/internal/nodeutil"
 	"github.com/kfangw/stablecoin-x402-gateway/ledger"
 	"github.com/kfangw/stablecoin-x402-gateway/registry"
 	"github.com/kfangw/stablecoin-x402-gateway/reserve"
+	"github.com/kfangw/stablecoin-x402-gateway/spend"
 	"github.com/kfangw/stablecoin-x402-gateway/token"
 	"github.com/kfangw/stablecoin-x402-gateway/wallet"
 	"github.com/kfangw/stablecoin-x402-gateway/x402"
@@ -45,8 +48,20 @@ func main() {
 		err = runDeploy(args)
 	case "deploy-registry":
 		err = runDeployRegistry(args)
+	case "deploy-eligibility":
+		err = runDeployEligibility(args)
+	case "deploy-asset":
+		err = runDeployAsset(args)
+	case "deploy-dvp":
+		err = runDeployDvP(args)
+	case "deploy-spend":
+		err = runDeploySpend(args)
 	case "mint":
 		err = runMint(args)
+	case "mint-asset":
+		err = runMintAsset(args)
+	case "set-eligible":
+		err = runSetEligible(args)
 	case "reconcile":
 		err = runReconcile(args)
 	case "reserve-add":
@@ -73,9 +88,15 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: issuer <command> [flags]
 
 commands:
-  deploy           deploy the tKRW token (deployer becomes the issuer)
-  deploy-registry  deploy the identity registry
-  mint             mint tKRW to an account (--reserve caps minting at the reserve total)
+  deploy             deploy the tKRW token (deployer becomes the issuer)
+  deploy-registry    deploy the identity registry
+  deploy-eligibility deploy the eligibility registry
+  deploy-asset       deploy the RWA asset (--registry gates recipients)
+  deploy-dvp         deploy the DvP settlement contract (--token, --asset)
+  deploy-spend       deploy the delegated-spend contract (--token)
+  mint               mint tKRW to an account (--reserve caps minting at the reserve total)
+  mint-asset         mint the RWA asset to an account
+  set-eligible       set or clear an account's eligibility (--off to clear)
   reconcile        reconcile the off-chain ledger against the node (--reserve adds the reserve invariant)
   reserve-add      record a reserve deposit
   reserve-sub      record a reserve withdrawal
@@ -146,6 +167,181 @@ func runDeployRegistry(args []string) error {
 	fmt.Printf("deployed identity registry on chain %s\n", chainID)
 	// Final line: the address only, for `REGISTRY=$(... | tail -1)`.
 	fmt.Println(reg.Address.Hex())
+	return nil
+}
+
+// deployContract runs a contract deployment and prints the address on the final
+// stdout line, matching runDeploy so scripts capture it with `$(... | tail -1)`.
+func deployContract(rpc string, deploy func(*bind.TransactOpts, bind.ContractBackend) (common.Address, *types.Transaction, error)) error {
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	opts, _, err := nodeutil.TransactorFromEnv(issuerKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+	addr, tx, err := deploy(opts, client)
+	if err != nil {
+		return err
+	}
+	if _, err := bind.WaitDeployed(ctx, client, tx); err != nil {
+		return fmt.Errorf("wait for deployment: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "deployed at %s\n", addr.Hex())
+	fmt.Println(addr.Hex())
+	return nil
+}
+
+func runDeployEligibility(args []string) error {
+	fs := flag.NewFlagSet("deploy-eligibility", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	fs.Parse(args)
+	return deployContract(*rpc, func(opts *bind.TransactOpts, backend bind.ContractBackend) (common.Address, *types.Transaction, error) {
+		r, tx, err := eligibility.Deploy(opts, backend)
+		if err != nil {
+			return common.Address{}, nil, err
+		}
+		return r.Address, tx, nil
+	})
+}
+
+func runDeployAsset(args []string) error {
+	fs := flag.NewFlagSet("deploy-asset", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	registryAddr := fs.String("registry", "", "eligibility registry address (empty: unrestricted transfers)")
+	fs.Parse(args)
+	reg := common.Address{}
+	if *registryAddr != "" {
+		if !common.IsHexAddress(*registryAddr) {
+			return fmt.Errorf("--registry must be a valid address")
+		}
+		reg = common.HexToAddress(*registryAddr)
+	}
+	return deployContract(*rpc, func(opts *bind.TransactOpts, backend bind.ContractBackend) (common.Address, *types.Transaction, error) {
+		a, tx, err := asset.Deploy(opts, backend, reg)
+		if err != nil {
+			return common.Address{}, nil, err
+		}
+		return a.Address, tx, nil
+	})
+}
+
+func runDeployDvP(args []string) error {
+	fs := flag.NewFlagSet("deploy-dvp", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	tokenAddr := fs.String("token", "", "tKRW token address (required)")
+	assetAddr := fs.String("asset", "", "RWA asset address (required)")
+	fs.Parse(args)
+	if err := requireHexAddress("token", *tokenAddr); err != nil {
+		return err
+	}
+	if err := requireHexAddress("asset", *assetAddr); err != nil {
+		return err
+	}
+	return deployContract(*rpc, func(opts *bind.TransactOpts, backend bind.ContractBackend) (common.Address, *types.Transaction, error) {
+		d, tx, err := dvp.Deploy(opts, backend, common.HexToAddress(*tokenAddr), common.HexToAddress(*assetAddr))
+		if err != nil {
+			return common.Address{}, nil, err
+		}
+		return d.Address, tx, nil
+	})
+}
+
+func runDeploySpend(args []string) error {
+	fs := flag.NewFlagSet("deploy-spend", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	tokenAddr := fs.String("token", "", "tKRW token address (required)")
+	fs.Parse(args)
+	if err := requireHexAddress("token", *tokenAddr); err != nil {
+		return err
+	}
+	return deployContract(*rpc, func(opts *bind.TransactOpts, backend bind.ContractBackend) (common.Address, *types.Transaction, error) {
+		s, tx, err := spend.Deploy(opts, backend, common.HexToAddress(*tokenAddr))
+		if err != nil {
+			return common.Address{}, nil, err
+		}
+		return s.Address, tx, nil
+	})
+}
+
+// runMintAsset mints the RWA asset to an account. The issuer is the asset's
+// deployer, so it can mint.
+func runMintAsset(args []string) error {
+	fs := flag.NewFlagSet("mint-asset", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	assetAddr := fs.String("asset", "", "RWA asset address (required)")
+	to := fs.String("to", "", "recipient address (required)")
+	amount := fs.String("amount", "", "amount to mint (required)")
+	fs.Parse(args)
+	if err := requireHexAddress("asset", *assetAddr); err != nil {
+		return err
+	}
+	if err := requireHexAddress("to", *to); err != nil {
+		return err
+	}
+	value, ok := new(big.Int).SetString(*amount, 10)
+	if !ok || value.Sign() <= 0 {
+		return fmt.Errorf("invalid --amount %q", *amount)
+	}
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	opts, _, err := nodeutil.TransactorFromEnv(issuerKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+	a := asset.Bind(common.HexToAddress(*assetAddr), client)
+	tx, err := a.Mint(opts, common.HexToAddress(*to), value)
+	if err != nil {
+		return fmt.Errorf("mint asset: %w", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, tx); err != nil {
+		return fmt.Errorf("wait for mint: %w", err)
+	}
+	fmt.Printf("minted %s tRWA to %s\n", value, *to)
+	return nil
+}
+
+// runSetEligible sets or clears an account's eligibility. The issuer is the
+// eligibility registrar in the demo.
+func runSetEligible(args []string) error {
+	fs := flag.NewFlagSet("set-eligible", flag.ExitOnError)
+	rpc := fs.String("rpc", "http://localhost:8545", "RPC endpoint")
+	registryAddr := fs.String("registry", "", "eligibility registry address (required)")
+	account := fs.String("account", "", "account to set (required)")
+	off := fs.Bool("off", false, "clear eligibility instead of setting it")
+	fs.Parse(args)
+	if err := requireHexAddress("registry", *registryAddr); err != nil {
+		return err
+	}
+	if err := requireHexAddress("account", *account); err != nil {
+		return err
+	}
+	ctx := context.Background()
+	client, chainID, err := nodeutil.Dial(ctx, *rpc)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	opts, _, err := nodeutil.TransactorFromEnv(issuerKeyEnv, chainID)
+	if err != nil {
+		return err
+	}
+	reg := eligibility.Bind(common.HexToAddress(*registryAddr), client)
+	tx, err := reg.SetEligible(opts, common.HexToAddress(*account), !*off)
+	if err != nil {
+		return fmt.Errorf("setEligible: %w", err)
+	}
+	if _, err := bind.WaitMined(ctx, client, tx); err != nil {
+		return fmt.Errorf("wait for setEligible: %w", err)
+	}
+	fmt.Printf("set eligibility of %s to %v\n", *account, !*off)
 	return nil
 }
 

@@ -88,6 +88,7 @@ func runGet(args []string) error {
 	grantTable := fs.String("grant-table", "", "grant decision-table JSON file deciding whether to pay")
 	sessionBudget := fs.Int64("session-budget", 0, "open a payment session with this budget and draw requests from it, then close")
 	sessionRequests := fs.Int("session-requests", 3, "requests to make within the session before closing (with --session-budget)")
+	receiptOut := fs.String("receipt-out", "", "write the settlement receipt JSON here (for offline audit)")
 	fs.Parse(args)
 
 	if *tokenAddr == "" || !common.IsHexAddress(*tokenAddr) {
@@ -183,6 +184,16 @@ func runGet(args []string) error {
 	fmt.Printf("response body: %s\n", result.Body)
 	if result.Settlement != nil {
 		fmt.Printf("settlement tx: %s\n", result.Settlement.Transaction)
+		if result.Settlement.DeliveryTransaction != "" {
+			fmt.Printf("delivery tx: %s\n", result.Settlement.DeliveryTransaction)
+		}
+		if *receiptOut != "" && result.Settlement.Receipt != nil {
+			body, _ := json.MarshalIndent(result.Settlement.Receipt, "", "  ")
+			if err := os.WriteFile(*receiptOut, body, 0o644); err != nil {
+				return fmt.Errorf("write receipt: %w", err)
+			}
+			fmt.Fprintf(os.Stderr, "wrote receipt to %s\n", *receiptOut)
+		}
 	}
 	return nil
 }
