@@ -349,14 +349,16 @@ func attachDvP(gw *x402.Gateway, client *ethclient.Client, dvpAddr string, amoun
 	if !common.IsHexAddress(dvpAddr) {
 		return fmt.Errorf("--dvp must be a valid address")
 	}
+	d := dvp.Bind(common.HexToAddress(dvpAddr), client)
+	gw.DvPAddress = d.Address
 	gw.Facilitator = &x402.LocalFacilitator{
 		Token:       gw.Token,
 		Backend:     client,
 		Transactor:  gw.Transactor,
-		DvP:         dvp.Bind(common.HexToAddress(dvpAddr), client),
+		DvP:         d,
 		AssetAmount: big.NewInt(amount),
 	}
-	log.Printf("dvp settlement on: contract %s, asset amount %d (atomic flow)", dvpAddr, amount)
+	log.Printf("dvp settlement on: contract %s, asset amount %d (atomic flow, receive-authorization)", dvpAddr, amount)
 	return nil
 }
 

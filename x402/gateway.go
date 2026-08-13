@@ -41,6 +41,11 @@ type Gateway struct {
 	// in the discovery response. Empty leaves the resource URL host-only.
 	ResourcePath string
 
+	// DvPAddress, when set, is the delivery-versus-payment contract. The gateway
+	// advertises it in the payment terms so the agent signs a receive
+	// authorization to the contract rather than a transfer to the seller.
+	DvPAddress common.Address
+
 	// Commit is called by the local facilitator right after a settlement
 	// transaction is submitted. On a simulated backend it mines a block;
 	// against a real node leave it nil.
@@ -113,6 +118,10 @@ type SettlementRecord struct {
 
 // Requirements builds the payment terms of this gateway.
 func (g *Gateway) Requirements(resource string) PaymentRequirements {
+	extra := map[string]string{"name": "KRW Test Stablecoin", "version": "1"}
+	if g.DvPAddress != (common.Address{}) {
+		extra["dvp"] = g.DvPAddress.Hex()
+	}
 	return PaymentRequirements{
 		Scheme:            SchemeExact,
 		Network:           g.Network,
@@ -123,7 +132,7 @@ func (g *Gateway) Requirements(resource string) PaymentRequirements {
 		PayTo:             g.PayTo.Hex(),
 		MaxTimeoutSeconds: int(g.timeout().Seconds()),
 		Asset:             g.Token.Address.Hex(),
-		Extra:             map[string]string{"name": "KRW Test Stablecoin", "version": "1"},
+		Extra:             extra,
 	}
 }
 

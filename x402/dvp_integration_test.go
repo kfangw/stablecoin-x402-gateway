@@ -75,11 +75,12 @@ func TestGatewayDvPMode(t *testing.T) {
 	mine(ast.Approve(seller, d.Address, big.NewInt(100)))
 
 	gw := &x402.Gateway{
-		Token:   tok,
-		Backend: client,
-		PayTo:   sellerAddr,
-		Price:   big.NewInt(500),
-		Network: fmt.Sprintf("eip155:%s", chainID),
+		Token:      tok,
+		Backend:    client,
+		PayTo:      sellerAddr,
+		Price:      big.NewInt(500),
+		Network:    fmt.Sprintf("eip155:%s", chainID),
+		DvPAddress: d.Address, // advertised in the terms so the agent signs a receive to the contract
 		Facilitator: &x402.LocalFacilitator{
 			Token:       tok,
 			Backend:     client,

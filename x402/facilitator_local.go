@@ -31,7 +31,8 @@ type LocalFacilitator struct {
 	// DvP, when set, switches Settle to the atomic delivery-versus-payment path:
 	// one settleAndDeliver transaction covers both payment and asset delivery, so
 	// the gateway's separate Deliverer is not used in this mode. AssetAmount is
-	// how much of the asset each settlement delivers.
+	// how much of the asset each settlement delivers; the seller is the payee
+	// (reqs.PayTo), which holds the asset and receives the forwarded payment.
 	DvP         *dvp.DvP
 	AssetAmount *big.Int
 
@@ -65,8 +66,16 @@ func (f *LocalFacilitator) Verify(ctx context.Context, p PaymentPayload, reqs Pa
 		return nil, fmt.Errorf("requirements payTo %q is not an address", reqs.PayTo)
 	}
 	payTo := common.HexToAddress(reqs.PayTo)
-	if auth.To != payTo {
-		return invalid(fmt.Sprintf("payTo mismatch: %s (want %s)", auth.To.Hex(), payTo.Hex())), nil
+	// In DvP mode the requirements advertise the settlement contract in
+	// Extra["dvp"]. The payment is a receive authorization whose recipient is that
+	// contract, not the seller; the seller (payTo) is unchanged, so mandate payee
+	// checks still bind against the real recipient.
+	recipient, useReceive := payTo, false
+	if d, ok := reqs.Extra["dvp"]; ok && common.IsHexAddress(d) {
+		recipient, useReceive = common.HexToAddress(d), true
+	}
+	if auth.To != recipient {
+		return invalid(fmt.Sprintf("recipient mismatch: %s (want %s)", auth.To.Hex(), recipient.Hex())), nil
 	}
 	price, ok := new(big.Int).SetString(reqs.MaxAmountRequired, 10)
 	if !ok {
@@ -88,7 +97,12 @@ func (f *LocalFacilitator) Verify(ctx context.Context, p PaymentPayload, reqs Pa
 	if err != nil {
 		return nil, fmt.Errorf("domain separator: %w", err)
 	}
-	signer, err := wallet.RecoverSigner(domain, auth, sig)
+	var signer common.Address
+	if useReceive {
+		signer, err = wallet.RecoverReceiveSigner(domain, auth, sig)
+	} else {
+		signer, err = wallet.RecoverSigner(domain, auth, sig)
+	}
 	if err != nil {
 		return invalid(fmt.Sprintf("signature recovery failed: %v", err)), nil
 	}
@@ -137,10 +151,13 @@ func (f *LocalFacilitator) Settle(ctx context.Context, p PaymentPayload, reqs Pa
 	}
 	var tx *types.Transaction
 	if f.DvP != nil {
-		// Atomic path: settle payment and deliver the asset in one transaction.
-		// The payment recipient (auth.To) is the seller that hands over the asset.
+		// Atomic path: settle payment and deliver the asset in one transaction. The
+		// authorization's recipient is the DvP contract (a receive authorization);
+		// the contract forwards the payment to the seller (the payee) and delivers
+		// the asset.
+		seller := common.HexToAddress(reqs.PayTo)
 		tx, err = f.DvP.SettleAndDeliver(
-			f.Transactor, auth.To, f.AssetAmount, auth.From, auth.Value, auth.ValidAfter, auth.ValidBefore, auth.Nonce, v, r, s,
+			f.Transactor, seller, f.AssetAmount, auth.From, auth.Value, auth.ValidAfter, auth.ValidBefore, auth.Nonce, v, r, s,
 		)
 	} else {
 		tx, err = f.Token.TransferWithAuthorization(

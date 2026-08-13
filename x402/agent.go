@@ -360,15 +360,28 @@ func (a *Agent) buildPayment(req PaymentRequirements, amount *big.Int) (string, 
 	if timeout <= 0 {
 		timeout = 60
 	}
+	// In DvP mode the terms advertise the settlement contract in Extra["dvp"]. The
+	// authorization's recipient is that contract and it is a receive authorization,
+	// so it can only be executed through the contract.
+	to := hexAddress(req.PayTo)
+	useReceive := false
+	if d, ok := req.Extra["dvp"]; ok && common.IsHexAddress(d) {
+		to, useReceive = common.HexToAddress(d), true
+	}
 	auth := wallet.Authorization{
 		From:        a.Wallet.Address,
-		To:          hexAddress(req.PayTo),
+		To:          to,
 		Value:       amount,
 		ValidAfter:  big.NewInt(0),
 		ValidBefore: big.NewInt(time.Now().Unix() + int64(timeout)),
 		Nonce:       nonce,
 	}
-	sig, err := a.Wallet.SignAuthorization(a.DomainSeparator, auth)
+	var sig []byte
+	if useReceive {
+		sig, err = a.Wallet.SignReceiveAuthorization(a.DomainSeparator, auth)
+	} else {
+		sig, err = a.Wallet.SignAuthorization(a.DomainSeparator, auth)
+	}
 	if err != nil {
 		return "", err
 	}

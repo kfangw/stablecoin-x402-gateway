@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 interface IPaymentToken {
-    function transferWithAuthorization(
+    function receiveWithAuthorization(
         address from,
         address to,
         uint256 value,
@@ -13,6 +13,8 @@ interface IPaymentToken {
         bytes32 r,
         bytes32 s
     ) external;
+
+    function transfer(address to, uint256 value) external returns (bool);
 }
 
 interface IAssetToken {
@@ -22,15 +24,16 @@ interface IAssetToken {
 /// @title DvPSettlement
 /// @notice Delivery-versus-payment: settles a payment and delivers an asset in a
 ///         single transaction, so the two either both happen or both revert.
-///         Payment uses the stablecoin's EIP-3009 transferWithAuthorization with
-///         the seller as recipient; delivery uses the asset's transferFrom, which
-///         requires the seller to have approved this contract in advance. The
-///         asset's own recipient-eligibility check runs inside transferFrom, so an
-///         ineligible buyer makes the whole transaction revert, payment included.
+///         Payment uses the stablecoin's EIP-3009 receiveWithAuthorization with
+///         this contract as recipient, so the authorization can only be executed
+///         through this contract and never extracted and settled on its own; the
+///         contract then forwards the payment to the seller. Delivery uses the
+///         asset's transferFrom, which requires the seller to have approved this
+///         contract in advance. The asset's own recipient-eligibility check runs
+///         inside transferFrom, so an ineligible buyer makes the whole transaction
+///         revert, payment included. Under the stablecoin allowlist this contract
+///         must be allowlisted, since it both receives and sends tKRW.
 ///         This is a minimal contract for verifying the flow, not production code.
-///         The payment authorization is not bound to this contract; a future
-///         receive-style path closes the window where the authorization could be
-///         extracted and submitted on its own.
 contract DvPSettlement {
     address public immutable paymentToken;
     address public immutable assetToken;
@@ -61,11 +64,17 @@ contract DvPSettlement {
         bytes32 r,
         bytes32 s
     ) external {
-        // 1. Payment: the authorization's recipient must be the seller.
-        IPaymentToken(paymentToken).transferWithAuthorization(
-            from, seller, value, validAfter, validBefore, nonce, v, r, s
+        // 1. Payment: receive into this contract. The authorization's recipient is
+        //    this contract, so it cannot be settled anywhere else.
+        IPaymentToken(paymentToken).receiveWithAuthorization(
+            from, address(this), value, validAfter, validBefore, nonce, v, r, s
         );
-        // 2. Delivery: pull the asset from the seller to the buyer. The seller
+        // 2. Forward the payment to the seller.
+        require(
+            IPaymentToken(paymentToken).transfer(seller, value),
+            "dvp: payment forward failed"
+        );
+        // 3. Delivery: pull the asset from the seller to the buyer. The seller
         //    must have approved this contract for at least assetAmount.
         require(
             IAssetToken(assetToken).transferFrom(seller, from, assetAmount),

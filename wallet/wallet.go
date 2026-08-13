@@ -134,13 +134,23 @@ func (w *Wallet) signStruct(domainSeparator [32]byte, a Authorization, structHas
 	return sig, nil
 }
 
-// RecoverSigner recovers the signer address from a signature. The gateway uses
-// it to reject bad payments before submitting anything on-chain.
+// RecoverSigner recovers the signer of a transfer authorization. The gateway
+// uses it to reject bad payments before submitting anything on-chain.
 func RecoverSigner(domainSeparator [32]byte, a Authorization, sig []byte) (common.Address, error) {
+	return recoverStruct(domainSeparator, a.StructHash(), sig)
+}
+
+// RecoverReceiveSigner recovers the signer of a receive authorization, used to
+// verify a DvP-mode payment whose recipient is the settlement contract.
+func RecoverReceiveSigner(domainSeparator [32]byte, a Authorization, sig []byte) (common.Address, error) {
+	return recoverStruct(domainSeparator, a.ReceiveStructHash(), sig)
+}
+
+func recoverStruct(domainSeparator [32]byte, structHash [32]byte, sig []byte) (common.Address, error) {
 	if len(sig) != 65 {
 		return common.Address{}, fmt.Errorf("wallet: signature must be 65 bytes, got %d", len(sig))
 	}
-	digest := Digest(domainSeparator, a.StructHash())
+	digest := Digest(domainSeparator, structHash)
 	cp := make([]byte, 65)
 	copy(cp, sig)
 	if cp[64] >= 27 {

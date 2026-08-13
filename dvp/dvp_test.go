@@ -116,20 +116,22 @@ func (e *dvpEnv) mine(tx *types.Transaction, err error) {
 	}
 }
 
-// sign builds and signs a fresh EIP-3009 authorization from the buyer to the
-// seller for the price, returning the fields settleAndDeliver needs.
+// sign builds and signs a fresh EIP-3009 receive authorization from the buyer to
+// the DvP contract for the price, returning the fields settleAndDeliver needs.
+// The recipient is the contract, so the authorization can only be settled through
+// it.
 func (e *dvpEnv) sign() (wallet.Authorization, uint8, [32]byte, [32]byte) {
 	e.t.Helper()
 	nonce, _ := wallet.NewNonce()
 	auth := wallet.Authorization{
 		From:        e.buyer.Address,
-		To:          e.sellerAddr,
+		To:          e.dvp.Address,
 		Value:       big.NewInt(price),
 		ValidAfter:  big.NewInt(0),
 		ValidBefore: big.NewInt(time.Now().Unix() + 300),
 		Nonce:       nonce,
 	}
-	sig, err := e.buyer.SignAuthorization(e.domain, auth)
+	sig, err := e.buyer.SignReceiveAuthorization(e.domain, auth)
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -202,6 +204,21 @@ func TestDvPRevertsForIneligibleBuyer(t *testing.T) {
 	}
 	if bal, _ := e.tok.BalanceOf(e.buyer.Address); bal.Int64() != 10_000 {
 		t.Errorf("buyer tKRW = %s, want 10000 (payment must not happen)", bal)
+	}
+}
+
+// The receive authorization can only be settled through the DvP contract: it is
+// not accepted as a transfer (wrong type hash) and cannot be received directly
+// (the recipient is the contract, not any caller).
+func TestDvPExtractionBlocked(t *testing.T) {
+	e := newDvPEnv(t)
+	a, v, r, s := e.sign() // a receive authorization whose recipient is the DvP contract
+
+	if _, err := e.tok.TransferWithAuthorization(e.issuer, a.From, a.To, a.Value, a.ValidAfter, a.ValidBefore, a.Nonce, v, r, s); err == nil {
+		t.Fatal("a receive authorization must not settle via transferWithAuthorization")
+	}
+	if _, err := e.tok.ReceiveWithAuthorization(e.issuer, a.From, a.To, a.Value, a.ValidAfter, a.ValidBefore, a.Nonce, v, r, s); err == nil {
+		t.Fatal("a receive authorization to the DvP contract must not settle from a direct caller")
 	}
 }
 
