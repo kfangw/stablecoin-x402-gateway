@@ -153,6 +153,8 @@ The notes group into three: how a payment is decided and settled, how the pieces
 
 **On-chain mandates, sessions, and discovery.** The same mandate terms the gateway checks off chain can be enforced on chain: `DelegatedSpend.sol` holds a delegator's deposit and lets the agent spend within a per-payment cap, validity window, payee allowlist, and cumulative budget, checked cheapest-first in the same order as the gateway policy. A parity test runs a shared case table through both enforcers and asserts they agree; the one intended difference, a fixed on-chain budget window versus the gateway's sliding one, is documented as a separated case. Payment sessions let one signed authorization cover many requests: the gateway meters each request against the budget and settles the whole authorization at close (or when it is spent, or the authorization nears expiry), refunding the unused remainder, so a session needs the refund path (`--sessions`). An unauthenticated `GET /resources` lists the gateway's paid resources in the public x402 discovery shape, which `agent discover` consumes. Full notes: [docs/design/contracts.md](docs/design/contracts.md) and [docs/design/gateway.md](docs/design/gateway.md).
 
+**Receipts and offline audit.** With a receipt key the gateway signs a settlement receipt that links the mandate, the settlement transaction, and any delivery under one signature, using a receipt-only key so a keyless gateway can still issue receipts. The gateway also records each accept decision and mandate revocation to the journal, and rebuilds a mandate's cumulative and frequency accounting and its revocation set from that journal on startup, so a restart does not reopen a spent budget or forget a revocation. The `audit` command verifies a receipt end to end: the gateway signature, the mandate's delegation chain, whether the mandate was revoked before the receipt was issued, and that the payment stayed within the mandate's scope, all offline; with an RPC endpoint it also confirms the settlement and delivery on chain. It reads the revocation and settlement events from a journal file or, with `--broker`, the Kafka topic the outbox publishes to. Full notes: [docs/design/records.md](docs/design/records.md) and [docs/design/gateway.md](docs/design/gateway.md).
+
 **The agent's delegation limit.** The agent refuses payment terms above its delegated limit (MaxAmount). It is a minimal illustration of where a safety boundary belongs when payment authority is delegated to an autonomous agent. Full note: [docs/design/agent.md](docs/design/agent.md).
 
 ### The topology
@@ -202,9 +204,26 @@ This repository verifies protocol flows; it is not a production implementation. 
 - The contract is unaudited and the token uses zero decimals. Regulatory requirements such as reserve attestation, allowlists, and freezing are out of scope.
 - The gateway can run the facilitator in-process or delegate to a remote one, but the facilitator itself is a single instance with no authentication, rate limiting, or horizontal scaling.
 - Agent identity uses a minimal local registry that records a registration flag and an agent-card URL. The card is stored but not fetched or validated, and the wider ERC-8004 identity and reputation surface is out of scope. A deployed registry would replace the local one behind the same read-only reader interface.
-- Mandate cumulative and rate accounting, the set of revoked mandates, the confirmation history, and the in-flight deferred-settlement map all live in gateway memory, so they reset if the gateway restarts. Making them durable belongs with the decision log, and on-chain mandate enforcement is a separate roadmap item.
+- With a journal, mandate cumulative and rate accounting and the set of revoked mandates are rebuilt on startup from the recorded decisions and revocations, so they survive a restart. The confirmation history and the in-flight deferred-settlement map still live in gateway memory and reset on restart.
 - The ledger keeps incremental indexing and reorg handling, but its state is in-memory and the reconciliation path still rescans from genesis; durable ledger storage is out of scope. Settlements can be journaled durably with `--journal`, but the ledger itself is not.
 - Keys are supplied via environment variables and live in process memory; production deployments assume KMS or HSM custody.
+
+## Trust assumptions
+
+The design does not ask any party to trust another's honesty; each thing a party could forge, steal, or censor is caught by a specific check. A third party can reconstruct and verify the whole chain from the receipts and the on-chain record.
+
+| Party | Could try to | The check that stops it |
+|---|---|---|
+| Agent | pay beyond its mandate | the gateway's mandate policy and the on-chain `DelegatedSpend` both enforce the mandate terms; an over-limit payment needs a delegator confirmation bound to that payment |
+| Agent | reuse a signature for a different resource | the nonce is derived from a seed and the resource, and the gateway recomputes it, so the same signature does not settle another resource |
+| Agent | replay a settled payment | the stablecoin marks each authorization nonce used once, across both `transferWithAuthorization` and `receiveWithAuthorization` |
+| Agent (or a third party) | extract a DvP payment authorization and settle it alone | the authorization is a receive authorization whose recipient is the DvP contract, so it settles only through that contract, atomically with delivery |
+| Gateway | forge a receipt | the receipt is signed by the gateway's receipt key; the audit command recovers the signer and checks it against the gateway's known address |
+| Gateway | claim a delivery that did not happen | the audit command confirms the settlement and delivery transactions on chain |
+| Facilitator | censor a settlement | the gateway can settle in-process or switch to another facilitator; the facilitator holds no monopoly on settlement |
+| Facilitator | alter the amount or payee | the payer's EIP-3009 signature fixes the amount and recipient; a changed value fails signature recovery before anything reaches the chain |
+| Delegator | deny a mandate it signed | the mandate is an EIP-712 signature the auditor verifies to the delegator's address, with its chain id, so it cannot be repudiated or replayed on another chain |
+| Issuer | mint beyond the reserve | minting is bounded by the off-chain reserve total, and reconciliation flags any supply above it |
 
 ## Roadmap
 
