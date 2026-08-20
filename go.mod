@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/ethereum/go-ethereum v1.14.13
-	github.com/twmb/franz-go v1.21.5
+	github.com/twmb/franz-go v1.21.6
 )
 
 require (
@@ -47,7 +47,7 @@ require (
 	github.com/holiman/uint256 v1.3.1 // indirect
 	github.com/huin/goupnp v1.3.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
+	github.com/klauspost/compress v1.18.7 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
